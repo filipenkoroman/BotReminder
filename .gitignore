@@ -1,0 +1,6 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+botreminder.sqlite3
+.DS_Store
