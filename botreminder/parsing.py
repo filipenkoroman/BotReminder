@@ -67,10 +67,25 @@ def extract_bare_time(lower: str) -> tuple[Optional[int], Optional[int], bool]:
     return hour, minute, vague
 
 def clean_title(text: str) -> str:
+    title = re.sub(r"^[\s,.:;]*(напомни|напоминай|напоминать)\s+(что\s+)?", "", text, flags=re.I)
+    title = re.sub(
+        r"\b(раз в месяц|каждый месяц|ежемесячно)\s+([1-9]|[12]\d|3[01])?\s*(?:числа|число)?\b",
+        "",
+        title,
+        flags=re.I,
+    )
+    title = re.sub(r"\b(напомни|напоминай|напоминать)\s+(что\s+)?", "", title, flags=re.I)
+    title = re.sub(
+        r"\b(каждого|каждое|каждый)\s+([1-9]|[12]\d|3[01])\s*(?:числа|число)?\b",
+        "",
+        title,
+        flags=re.I,
+    )
+    title = re.sub(r"\b(будет|будут|надо|нужно)\b", "", title, flags=re.I)
     title = re.sub(
         r"\b(сегодня|завтра|послезавтра|напомни|за\s+\d+\s*(минут|мин|час|часа|часов))\b",
         "",
-        text,
+        title,
         flags=re.I,
     )
     parts = [part.strip(" ,.") for part in re.split(r"[,;]", title) if part.strip(" ,.")]
@@ -84,7 +99,7 @@ def clean_title(text: str) -> str:
         title,
         flags=re.I,
     )
-    return re.sub(r"\s+", " ", title).strip(" ,.")
+    return re.sub(r"\s+", " ", title).strip(" ,.«»\"")
 
 def fallback_parse(text: str) -> ParsedIntent:
     lower = text.lower().strip()
@@ -274,7 +289,11 @@ def next_monthly_occurrence(day: int, hour: int = 9, minute: int = 0) -> datetim
 
 def monthly_day_from_text(text: str) -> Optional[int]:
     lower = text.lower()
-    if not any(marker in lower for marker in ["раз в месяц", "каждый месяц", "ежемесяч"]):
+    has_monthly_marker = any(marker in lower for marker in ["раз в месяц", "каждый месяц", "ежемесяч"])
+    ordinal_match = re.search(r"\b(?:каждого|каждое|каждый)\s+([1-9]|[12]\d|3[01])\s*(?:числа|число)?\b", lower)
+    if ordinal_match:
+        return int(ordinal_match.group(1))
+    if not has_monthly_marker:
         return None
     match = re.search(r"\b([1-9]|[12]\d|3[01])\s*(?:числа|число)?\b", lower)
     if not match:
@@ -325,10 +344,18 @@ def normalize_parsed_intent(parsed: ParsedIntent) -> ParsedIntent:
     return parsed
 
 async def ai_parse(text: str, user_id: int = 0) -> ParsedIntent:
+    local = normalize_parsed_intent(fallback_parse(text))
+    if local.repeat_rule and (
+        monthly_day_from_text(text)
+        or any(marker in text.lower() for marker in ["подписк", "списан", "оплат", "платеж", "платёж", "счет", "счёт"])
+    ):
+        await log_event(user_id, "local_repeat_parse", text, local.__dict__)
+        return local
+
     if not openai_client:
-        return fallback_parse(text)
+        return local
     if not await api_budget_available(user_id):
-        return fallback_parse(text)
+        return local
 
     learned = await recent_learning_examples(user_id)
     system = f"""
