@@ -121,12 +121,14 @@ async def init_db() -> None:
                 last_ping_at TEXT,
                 next_ping_at TEXT,
                 repeat_rule TEXT,
+                repeat_until TEXT,
                 raw_text TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        await ensure_column(db, "events", "repeat_until", "TEXT")
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS pending_questions (
@@ -177,6 +179,11 @@ async def init_db() -> None:
         )
         await db.commit()
 
+async def ensure_column(db: aiosqlite.Connection, table: str, column: str, column_type: str) -> None:
+    rows = await (await db.execute(f"PRAGMA table_info({table})")).fetchall()
+    if column not in {row[1] for row in rows}:
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+
 async def save_pending_question(user_id: int, parsed: ParsedIntent, question: str) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -206,8 +213,8 @@ async def create_event(user_id: int, parsed: ParsedIntent) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             """
-            INSERT INTO events(user_id, title, kind, starts_at, reminders_json, repeat_rule, raw_text, created_at, updated_at)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO events(user_id, title, kind, starts_at, reminders_json, repeat_rule, repeat_until, raw_text, created_at, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -216,6 +223,7 @@ async def create_event(user_id: int, parsed: ParsedIntent) -> int:
                 parsed.starts_at,
                 json.dumps(parsed.reminders or [60, 30]),
                 parsed.repeat_rule,
+                parsed.repeat_until,
                 parsed.original_text,
                 created,
                 created,
@@ -263,9 +271,9 @@ async def mark_event_departed(event_id: int) -> None:
 async def mark_event_arrived(event_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         row = await (
-            await db.execute("SELECT starts_at, repeat_rule FROM events WHERE id=?", (event_id,))
+            await db.execute("SELECT starts_at, repeat_rule, repeat_until FROM events WHERE id=?", (event_id,))
         ).fetchone()
-        next_start = next_repeat_start(row[0], row[1]) if row else None
+        next_start = next_repeat_start(row[0], row[1], row[2]) if row else None
         if next_start:
             await db.execute(
                 """
@@ -286,9 +294,9 @@ async def mark_event_arrived(event_id: int) -> None:
 async def mark_task_done(event_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         row = await (
-            await db.execute("SELECT starts_at, repeat_rule FROM events WHERE id=?", (event_id,))
+            await db.execute("SELECT starts_at, repeat_rule, repeat_until FROM events WHERE id=?", (event_id,))
         ).fetchone()
-        next_start = next_repeat_start(row[0], row[1]) if row else None
+        next_start = next_repeat_start(row[0], row[1], row[2]) if row else None
         if next_start:
             await db.execute(
                 """
@@ -306,14 +314,38 @@ async def mark_task_done(event_id: int) -> None:
         )
         await db.commit()
 
-def next_repeat_start(starts_at_raw: Optional[str], repeat_rule: Optional[str]) -> Optional[datetime]:
+def next_repeat_start(
+    starts_at_raw: Optional[str],
+    repeat_rule: Optional[str],
+    repeat_until_raw: Optional[str] = None,
+) -> Optional[datetime]:
     if not starts_at_raw or not repeat_rule:
         return None
     lower = repeat_rule.lower()
     starts_at = parse_dt(starts_at_raw)
     if not starts_at:
         return None
-    if any(marker in lower for marker in ["каждый месяц", "раз в месяц", "ежемесяч"]):
+
+    def allowed(candidate: datetime) -> bool:
+        if not repeat_until_raw or repeat_until_raw == "never":
+            return True
+        repeat_until = parse_dt(repeat_until_raw)
+        return bool(repeat_until and candidate <= repeat_until)
+
+    candidate = None
+    if any(marker in lower for marker in ["каждый день", "ежеднев", "раз в день"]):
+        candidate = starts_at + timedelta(days=1)
+        while candidate <= now():
+            candidate += timedelta(days=1)
+    elif any(marker in lower for marker in ["каждые 2 недели", "каждые две недели", "раз в 2 недели", "раз в две недели"]):
+        candidate = starts_at + timedelta(days=14)
+        while candidate <= now():
+            candidate += timedelta(days=14)
+    elif any(marker in lower for marker in ["каждую неделю", "каждый понедельник", "каждый вторник", "каждую среду", "каждый четверг", "каждую пятницу", "каждую субботу", "каждое воскресенье", "еженедель", "раз в неделю"]):
+        candidate = starts_at + timedelta(days=7)
+        while candidate <= now():
+            candidate += timedelta(days=7)
+    elif any(marker in lower for marker in ["каждый месяц", "раз в месяц", "ежемесяч"]):
         day_match = re.search(r"\b([1-9]|[12]\d|3[01])\s*(?:числа|число)?\b", lower)
         day = int(day_match.group(1)) if day_match else starts_at.day
         year = starts_at.year
@@ -331,11 +363,13 @@ def next_repeat_start(starts_at_raw: Optional[str], repeat_rule: Optional[str]) 
                     year += 1
                 continue
             if candidate > now():
-                return candidate
+                break
             month += 1
             if month == 13:
                 month = 1
                 year += 1
+    if candidate and allowed(candidate):
+        return candidate
     return None
 
 async def snooze_event_to(event_id: int, new_start: datetime) -> None:

@@ -139,16 +139,118 @@ def fallback_parse(text: str) -> ParsedIntent:
     kind = "task" if soft_task and not starts_at else "event"
     needs_time = kind == "task" and starts_at is None
     title = clean_title(text)
+    repeat_rule = repeat_rule_from_text(text)
     return ParsedIntent(
         action="create",
         title=title or text,
         kind=kind,
         starts_at=starts_at,
         reminders=[5, 1] if relative_match else default_reminders(text),
+        repeat_rule=repeat_rule,
+        repeat_until=extract_repeat_until(text),
         assumptions=assumptions,
         needs_time_question=needs_time,
         original_text=text,
     )
+
+def repeat_rule_from_text(text: str) -> Optional[str]:
+    lower = text.lower()
+    if any(marker in lower for marker in ["каждый день", "ежеднев", "раз в день"]):
+        return "каждый день"
+    if any(marker in lower for marker in ["каждые 2 недели", "каждые две недели", "раз в 2 недели", "раз в две недели"]):
+        return "каждые две недели"
+    weekdays = {
+        "понедельник": ["понедельник", "понедельникам"],
+        "вторник": ["вторник", "вторникам"],
+        "среду": ["среду", "средам"],
+        "четверг": ["четверг", "четвергам"],
+        "пятницу": ["пятницу", "пятницам"],
+        "субботу": ["субботу", "субботам"],
+        "воскресенье": ["воскресенье", "воскресеньям"],
+    }
+    for label, forms in weekdays.items():
+        if any(f"каждый {form}" in lower or f"каждую {form}" in lower for form in forms):
+            return f"каждую неделю, {label}"
+    if any(marker in lower for marker in ["каждую неделю", "еженедель", "раз в неделю"]):
+        return "каждую неделю"
+    month_day = monthly_day_from_text(text)
+    if month_day:
+        return f"каждый месяц {month_day} числа"
+    if any(marker in lower for marker in ["каждый месяц", "ежемесяч", "раз в месяц"]):
+        return "каждый месяц"
+    return None
+
+def extract_repeat_until(text: str) -> Optional[str]:
+    lower = text.lower()
+    current = now()
+    if any(marker in lower for marker in ["навсегда", "бессрочно", "пока не отменю", "без конца"]):
+        return "never"
+    if "до конца года" in lower:
+        return current.replace(month=12, day=31, hour=23, minute=59).isoformat()
+
+    relative = re.search(r"\b(?:на|до)\s+(\d+)\s*(день|дня|дней|неделю|недели|недель|месяц|месяца|месяцев|год|года|лет)\b", lower)
+    if relative:
+        amount = int(relative.group(1))
+        unit = relative.group(2)
+        if unit.startswith("д"):
+            return (current + timedelta(days=amount)).replace(hour=23, minute=59).isoformat()
+        if unit.startswith("н"):
+            return (current + timedelta(days=amount * 7)).replace(hour=23, minute=59).isoformat()
+        if unit.startswith("м"):
+            return add_months(current, amount).replace(hour=23, minute=59).isoformat()
+        return current.replace(year=current.year + amount, hour=23, minute=59).isoformat()
+
+    date_match = re.search(r"\bдо\s+(\d{1,2})(?:[.\s/]+(\d{1,2}|января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря))(?:[.\s/]+(\d{2,4}))?\b", lower)
+    if date_match:
+        day = int(date_match.group(1))
+        month_raw = date_match.group(2)
+        year_raw = date_match.group(3)
+        month = month_number(month_raw)
+        year = int(year_raw) if year_raw else current.year
+        if year < 100:
+            year += 2000
+        try:
+            candidate = current.replace(year=year, month=month, day=day, hour=23, minute=59)
+        except ValueError:
+            return None
+        if not year_raw and candidate < current:
+            candidate = candidate.replace(year=year + 1)
+        return candidate.isoformat()
+    return None
+
+def month_number(value: str) -> int:
+    months = {
+        "января": 1,
+        "февраля": 2,
+        "марта": 3,
+        "апреля": 4,
+        "мая": 5,
+        "июня": 6,
+        "июля": 7,
+        "августа": 8,
+        "сентября": 9,
+        "октября": 10,
+        "ноября": 11,
+        "декабря": 12,
+    }
+    if value in months:
+        return months[value]
+    if value.isdigit():
+        return int(value)
+    return 1
+
+def add_months(value: datetime, months: int) -> datetime:
+    month = value.month - 1 + months
+    year = value.year + month // 12
+    month = month % 12 + 1
+    day = min(value.day, days_in_month(year, month))
+    return value.replace(year=year, month=month, day=day)
+
+def days_in_month(year: int, month: int) -> int:
+    if month == 12:
+        return 31
+    first_next = datetime(year, month + 1, 1, tzinfo=now().tzinfo)
+    return (first_next - timedelta(days=1)).day
 
 def next_monthly_occurrence(day: int, hour: int = 9, minute: int = 0) -> datetime:
     current = now()
@@ -185,6 +287,8 @@ def normalize_parsed_intent(parsed: ParsedIntent) -> ParsedIntent:
 
     source = " ".join(filter(None, [parsed.original_text, parsed.repeat_rule or ""]))
     lower_source = source.lower()
+    parsed.repeat_rule = parsed.repeat_rule or repeat_rule_from_text(source)
+    parsed.repeat_until = parsed.repeat_until or extract_repeat_until(source)
 
     if any(marker in lower_source for marker in ["подписк", "списан", "оплат", "платеж", "платёж", "счет", "счёт"]):
         parsed.kind = "task"
@@ -215,6 +319,9 @@ def normalize_parsed_intent(parsed: ParsedIntent) -> ParsedIntent:
         parsed.assumptions = list(parsed.assumptions or [])
         parsed.assumptions.append(f"исправил дату в прошлом на ближайшее будущее время: {shifted.strftime('%d.%m %H:%M')}")
 
+    if parsed.repeat_rule and not parsed.repeat_until:
+        parsed.needs_repeat_until_question = True
+
     return parsed
 
 async def ai_parse(text: str, user_id: int = 0) -> ParsedIntent:
@@ -234,8 +341,10 @@ async def ai_parse(text: str, user_id: int = 0) -> ParsedIntent:
   "starts_at": "ISO datetime with timezone или null",
   "reminders": [минуты до события, например 60,30],
   "repeat_rule": "человеческое описание повтора или null",
+  "repeat_until": "ISO datetime with timezone, never или null",
   "assumptions": ["короткие объяснения твоих догадок"],
-  "needs_time_question": true|false
+  "needs_time_question": true|false,
+  "needs_repeat_until_question": true|false
 }}
 Если задача без времени, поставь kind=task, starts_at=null, needs_time_question=true.
 Если есть примерное время ("около 17", "после 14", "ближе к вечеру", "после обеда"), НЕ спрашивай точное время:
@@ -246,6 +355,10 @@ async def ai_parse(text: str, user_id: int = 0) -> ParsedIntent:
 Для "после обеда" ставь 14:00 сегодня, если время еще впереди, иначе завтра.
 Если время примерное, reminders=[60,30,15,10].
 Если пользователь пишет "через N минут/часов", поставь starts_at=N минут/часов от текущего времени, kind=event, reminders=[5,1] для коротких интервалов.
+Если пользователь просит повтор ("каждый день", "каждую неделю", "каждые две недели", "раз в месяц", "каждое 15 число"), заполни repeat_rule.
+Если пользователь явно говорит "навсегда", "бессрочно", "пока не отменю", поставь repeat_until="never".
+Если пользователь говорит "до 1 сентября", "до конца года", "на 3 месяца", поставь repeat_until ISO.
+Если repeat_rule есть, но непонятно когда прекращать повторять, поставь needs_repeat_until_question=true.
 Спрашивай уточнение только если вообще нет даты/времени или невозможно сделать полезную догадку.
 {learned}
 """
@@ -278,8 +391,10 @@ async def ai_parse(text: str, user_id: int = 0) -> ParsedIntent:
             starts_at=payload.get("starts_at"),
             reminders=payload.get("reminders") or default_reminders(text),
             repeat_rule=payload.get("repeat_rule"),
+            repeat_until=payload.get("repeat_until"),
             assumptions=payload.get("assumptions") or [],
             needs_time_question=bool(payload.get("needs_time_question")),
+            needs_repeat_until_question=bool(payload.get("needs_repeat_until_question")),
             original_text=text,
         ))
         await log_event(user_id, "ai_parse", text, parsed.__dict__)
@@ -383,4 +498,18 @@ def apply_time_to_pending(pending: ParsedIntent, text: str) -> Optional[ParsedIn
     pending.needs_time_question = False
     pending.reminders = [60, 30, 15, 10] if vague else (pending.reminders or [60, 30])
     pending.assumptions = assumptions
+    return pending
+
+def apply_repeat_until_to_pending(pending: ParsedIntent, text: str) -> Optional[ParsedIntent]:
+    repeat_until = extract_repeat_until(text)
+    if not repeat_until:
+        return None
+    pending.repeat_until = repeat_until
+    pending.needs_repeat_until_question = False
+    pending.assumptions = list(pending.assumptions or [])
+    if repeat_until == "never":
+        pending.assumptions.append("повтор будет идти, пока ты сам его не отменишь")
+    else:
+        until_dt = datetime.fromisoformat(repeat_until)
+        pending.assumptions.append(f"повтор будет идти до {until_dt.strftime('%d.%m.%Y')}")
     return pending

@@ -23,7 +23,15 @@ from .db import (
 )
 from .keyboards import confirm_delete_keyboard, manage_keyboard, snooze_keyboard
 from .models import ParsedIntent
-from .parsing import ai_parse, apply_time_to_pending, merge_pending_with_parsed, named_snooze_time, normalize_parsed_intent, transcribe_voice
+from .parsing import (
+    ai_parse,
+    apply_repeat_until_to_pending,
+    apply_time_to_pending,
+    merge_pending_with_parsed,
+    named_snooze_time,
+    normalize_parsed_intent,
+    transcribe_voice,
+)
 from .time_utils import now, parse_dt
 from .views import (
     ask_delete,
@@ -110,7 +118,15 @@ async def handle_text(message: Message, text: str) -> None:
 
     pending = await pop_pending_question(message.from_user.id)
     if pending:
-        parsed = apply_time_to_pending(pending, text)
+        if pending.needs_repeat_until_question:
+            parsed = apply_repeat_until_to_pending(pending, text)
+            if not parsed:
+                question = "Не понял срок повтора. Ответь, например: «навсегда», «до 1 сентября» или «на 3 месяца»."
+                await save_pending_question(message.from_user.id, pending, question)
+                await message.answer(question)
+                return
+        else:
+            parsed = apply_time_to_pending(pending, text)
         if not parsed:
             combined = f"{pending.original_text}. Уточнение пользователя: {text}"
             parsed = merge_pending_with_parsed(pending, await ai_parse(combined, message.from_user.id))
@@ -140,6 +156,15 @@ async def handle_text(message: Message, text: str) -> None:
 
     if parsed.kind == "event" and not parsed.starts_at:
         question = "Во сколько это? Дай дату/время, и я запишу."
+        await save_pending_question(message.from_user.id, parsed, question)
+        await message.answer(question)
+        return
+
+    if parsed.repeat_rule and parsed.needs_repeat_until_question and not parsed.repeat_until:
+        question = (
+            f"Повтор понял: {parsed.repeat_rule}. Когда перестать повторять?\n"
+            "Можно ответить: «навсегда», «до 1 сентября» или «на 3 месяца»."
+        )
         await save_pending_question(message.from_user.id, parsed, question)
         await message.answer(question)
         return

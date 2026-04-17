@@ -28,7 +28,7 @@ async def finish_create(message: Message, parsed: ParsedIntent) -> None:
                 f"Напомню: {', '.join(str(x) + ' мин' for x in (parsed.reminders or [60, 30]))}."
             )
             if parsed.repeat_rule:
-                text += f"\nПовтор: {parsed.repeat_rule}."
+                text += repeat_text(parsed)
         else:
             text = f"Записал задачу: {parsed.title}\nПинги: утром каждый день, пока не нажмешь «Готово»."
         if parsed.assumptions:
@@ -36,9 +36,18 @@ async def finish_create(message: Message, parsed: ParsedIntent) -> None:
         await message.answer(text, reply_markup=event_keyboard(event_id, "before", "task"))
     else:
         text = f"Записал: {parsed.title}\nКогда: {fmt_dt(parsed.starts_at)}\nНапомню: {', '.join(str(x) + ' мин' for x in (parsed.reminders or [60, 30]))}."
+        if parsed.repeat_rule:
+            text += repeat_text(parsed)
         if parsed.assumptions:
             text += "\nЯ предположил: " + "; ".join(parsed.assumptions) + "."
         await message.answer(text, reply_markup=event_keyboard(event_id, "before", "event"))
+
+def repeat_text(parsed: ParsedIntent) -> str:
+    if parsed.repeat_until == "never":
+        return f"\nПовтор: {parsed.repeat_rule}, пока не отменишь."
+    if parsed.repeat_until:
+        return f"\nПовтор: {parsed.repeat_rule}, до {fmt_dt(parsed.repeat_until)}."
+    return f"\nПовтор: {parsed.repeat_rule}."
 
 async def ask_delete(message: Message, query: str) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
