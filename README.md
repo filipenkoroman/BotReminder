@@ -48,3 +48,19 @@ python bot.py
 - месячный лимит `API_MONTHLY_LIMIT_USD=5`.
 
 Если лимит исчерпан, бот перестает ходить в OpenAI API и продолжает работать локальными правилами.
+
+## Структура проекта
+
+```text
+bot.py                  # тонкая точка входа
+botreminder/config.py   # настройки, Telegram/OpenAI клиенты
+botreminder/models.py   # dataclass-модели intent-ов
+botreminder/db.py       # SQLite, события, логи, обучение, расходы API
+botreminder/parsing.py  # локальный и OpenAI-парсинг текста/голоса
+botreminder/commands.py # контекстные команды к текущему событию
+botreminder/keyboards.py# inline-кнопки Telegram
+botreminder/views.py    # ответы пользователю и списки событий
+botreminder/handlers.py # Telegram handlers
+botreminder/scheduler.py# цикл напоминаний и эскалация
+botreminder/main.py     # сборка приложения и запуск polling
+```
