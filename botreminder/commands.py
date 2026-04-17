@@ -151,10 +151,10 @@ async def apply_command_intent(message: Message, focus, intent: CommandIntent) -
     if intent.action == "done":
         if kind == "task":
             await mark_task_done(event_id)
-            await message.answer(f"Готово, закрыл задачу: {title}.")
+            await message.answer(f"Сделано, закрыл задачу: {title}.")
         else:
             await mark_event_arrived(event_id)
-            await message.answer(f"Готово, закрыл событие: {title}. Больше по нему не пингую.")
+            await message.answer(f"Сделано, закрыл событие: {title}. Больше по нему не пингую.")
         return True
     if intent.action == "delete":
         await message.answer(f"Удаляем «{title}»?", reply_markup=confirm_delete_keyboard(event_id))

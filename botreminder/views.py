@@ -17,6 +17,28 @@ from .models import ParsedIntent
 from .time_utils import fmt_dt, month_start_iso, now, parse_dt
 
 
+HELP_TEXT = """Что я умею:
+
+/today — что сегодня
+/week — ближайшая неделя
+/month — ближайший месяц
+/list — все активные задачи и события
+/hot — что горит прямо сейчас
+/cost — расходы OpenAI API
+/logs — последние действия бота
+/learned — чему я уже научился
+/help — это меню
+
+Можно писать обычным языком:
+«Стоматолог завтра в 10, напомни за час и за 30 минут»
+«Напомни что каждого 15 числа будет оплата за личный чат джпт»
+«Купить подарок на неделе»
+«Удали встречу с Сашей»
+«Эта задача выполнена»
+
+Для повторов я спрошу, когда перестать повторять: навсегда, до 1 сентября или на 3 месяца."""
+
+
 async def finish_create(message: Message, parsed: ParsedIntent) -> None:
     event_id = await create_event(message.from_user.id, parsed)
     await log_event(message.from_user.id, "event_created", parsed.original_text, {"event_id": event_id, **parsed.__dict__})
@@ -30,7 +52,7 @@ async def finish_create(message: Message, parsed: ParsedIntent) -> None:
             if parsed.repeat_rule:
                 text += repeat_text(parsed)
         else:
-            text = f"Записал задачу: {parsed.title}\nПинги: утром каждый день, пока не нажмешь «Готово»."
+            text = f"Записал задачу: {parsed.title}\nПинги: утром каждый день, пока не нажмешь «Сделано»."
         if parsed.assumptions:
             text += "\nЯ предположил: " + "; ".join(parsed.assumptions) + "."
         await message.answer(text, reply_markup=event_keyboard(event_id, "before", "task"))
@@ -111,7 +133,7 @@ async def send_event_details(chat_id: int, event_id: int) -> None:
     if confirmed:
         status_bits.append("на месте")
     if done:
-        status_bits.append("готово")
+        status_bits.append("сделано")
     phase = "started" if starts_at and parse_dt(starts_at) and now() >= parse_dt(starts_at) else "before"
     text = (
         f"{title}\n"

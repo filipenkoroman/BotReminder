@@ -17,6 +17,7 @@ from .db import (
     mark_event_departed,
     mark_event_seen,
     mark_task_done,
+    pop_pending_question,
     save_learning_example,
     save_pending_question,
     snooze_event_to,
@@ -34,6 +35,7 @@ from .parsing import (
 )
 from .time_utils import now, parse_dt
 from .views import (
+    HELP_TEXT,
     ask_delete,
     finish_create,
     send_api_stats,
@@ -49,6 +51,9 @@ def owner_allowed(message: Message) -> bool:
 
 async def handle_quick_reply(message: Message, text: str) -> bool:
     lower = text.lower().strip(" .,!?:;")
+    if lower in {"help", "помощь", "команды", "меню", "что ты умеешь", "что умеешь"}:
+        await message.answer(HELP_TEXT)
+        return True
     if lower in {"что горит", "горит", "срочное", "что срочно", "важное сейчас"}:
         await send_calendar(message, "hot")
         return True
@@ -149,7 +154,7 @@ async def handle_text(message: Message, text: str) -> None:
         return
 
     if parsed.needs_time_question and not parsed.starts_at:
-        question = "Когда тебя пинать по этой задаче? Могу утром каждый день, пока не нажмешь «Готово»."
+        question = "Когда тебя пинать по этой задаче? Могу утром каждый день, пока не нажмешь «Сделано»."
         await save_pending_question(message.from_user.id, parsed, question)
         await message.answer(question)
         return
@@ -175,14 +180,15 @@ async def start(message: Message) -> None:
     if not owner_allowed(message):
         await message.answer("Этот бот пока личный.")
         return
-    await message.answer(
-        "Я на связи. Кидай текстом или голосом: событие, время и как напоминать.\n"
-        "Например: «Стоматолог завтра в 10, напомни за час и за 30 минут».\n"
-        "Чтобы управлять событиями кнопками, напиши /list или «список».\n"
-        "Чтобы увидеть только срочное, напиши /hot или «что горит».\n"
-        "Чтобы проверить расходы API, напиши /cost.\n"
-        "Чтобы посмотреть логи, напиши /logs."
-    )
+    await message.answer("Я на связи. Кидай текстом или голосом, а команды вот тут:\n\n" + HELP_TEXT)
+
+
+@dp.message(Command("help"))
+async def help_command(message: Message) -> None:
+    if not owner_allowed(message):
+        await message.answer("Этот бот пока личный.")
+        return
+    await message.answer(HELP_TEXT)
 
 
 @dp.message(Command("today"))
@@ -289,10 +295,10 @@ async def callbacks(query: CallbackQuery) -> None:
     elif action == "done":
         if row[3] == "task":
             await mark_task_done(event_id)
-            await query.message.answer("Готово. Вычеркиваю.")
+            await query.message.answer("Сделано. Вычеркиваю.")
         else:
             await mark_event_arrived(event_id)
-            await query.message.answer("Готово, закрыл событие. Больше по нему не пингую.")
+            await query.message.answer("Сделано, закрыл событие. Больше по нему не пингую.")
     elif action == "snooze":
         await query.message.answer("На сколько отложить?", reply_markup=snooze_keyboard(event_id))
     elif action == "snooze_set":

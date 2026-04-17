@@ -6,7 +6,7 @@ from .time_utils import fmt_dt
 def event_keyboard(event_id: int, phase: str, kind: str) -> InlineKeyboardMarkup:
     if kind == "task":
         rows = [
-            [InlineKeyboardButton(text="Готово", callback_data=f"done:{event_id}")],
+            [InlineKeyboardButton(text="Сделано", callback_data=f"done:{event_id}")],
             [
                 InlineKeyboardButton(text="Отложить", callback_data=f"snooze:{event_id}"),
                 InlineKeyboardButton(text="Отменить", callback_data=f"cancel:{event_id}"),
@@ -18,7 +18,7 @@ def event_keyboard(event_id: int, phase: str, kind: str) -> InlineKeyboardMarkup
         rows = [
             [
                 InlineKeyboardButton(text="Я тут", callback_data=f"arrived:{event_id}"),
-                InlineKeyboardButton(text="Готово", callback_data=f"done:{event_id}"),
+                InlineKeyboardButton(text="Сделано", callback_data=f"done:{event_id}"),
             ],
             [
                 InlineKeyboardButton(text="Опаздываю", callback_data=f"late:{event_id}"),
@@ -32,7 +32,7 @@ def event_keyboard(event_id: int, phase: str, kind: str) -> InlineKeyboardMarkup
                 InlineKeyboardButton(text="Вижу", callback_data=f"seen:{event_id}"),
                 InlineKeyboardButton(text="Выдвигаюсь", callback_data=f"departed:{event_id}"),
             ],
-            [InlineKeyboardButton(text="Готово", callback_data=f"done:{event_id}")],
+            [InlineKeyboardButton(text="Сделано", callback_data=f"done:{event_id}")],
             [
                 InlineKeyboardButton(text="Отложить", callback_data=f"snooze:{event_id}"),
                 InlineKeyboardButton(text="Изменить", callback_data=f"edit:{event_id}"),
@@ -103,7 +103,7 @@ def calendar_keyboard(rows) -> InlineKeyboardMarkup:
 def manage_keyboard(event_id: int, kind: str, phase: str = "before") -> InlineKeyboardMarkup:
     if kind == "task":
         rows = [
-            [InlineKeyboardButton(text="Готово", callback_data=f"done:{event_id}")],
+            [InlineKeyboardButton(text="Сделано", callback_data=f"done:{event_id}")],
             [
                 InlineKeyboardButton(text="Отложить", callback_data=f"snooze:{event_id}"),
                 InlineKeyboardButton(text="Удалить", callback_data=f"cancel:{event_id}"),
@@ -113,7 +113,7 @@ def manage_keyboard(event_id: int, kind: str, phase: str = "before") -> InlineKe
         rows = [
             [
                 InlineKeyboardButton(text="Я тут", callback_data=f"arrived:{event_id}"),
-                InlineKeyboardButton(text="Готово", callback_data=f"done:{event_id}"),
+                InlineKeyboardButton(text="Сделано", callback_data=f"done:{event_id}"),
             ],
             [
                 InlineKeyboardButton(text="Опаздываю", callback_data=f"late:{event_id}"),
@@ -127,7 +127,7 @@ def manage_keyboard(event_id: int, kind: str, phase: str = "before") -> InlineKe
                 InlineKeyboardButton(text="Вижу", callback_data=f"seen:{event_id}"),
                 InlineKeyboardButton(text="Выдвигаюсь", callback_data=f"departed:{event_id}"),
             ],
-            [InlineKeyboardButton(text="Готово", callback_data=f"done:{event_id}")],
+            [InlineKeyboardButton(text="Сделано", callback_data=f"done:{event_id}")],
             [
                 InlineKeyboardButton(text="Отложить", callback_data=f"snooze:{event_id}"),
                 InlineKeyboardButton(text="Изменить", callback_data=f"edit:{event_id}"),

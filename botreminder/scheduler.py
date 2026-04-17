@@ -49,7 +49,7 @@ async def send_due_notifications() -> None:
                         await bot.send_message(
                             user_id,
                             f"Бро, задача «{title}» актуальна в {starts_at.strftime('%H:%M')}.\n"
-                            f"Напоминаю за {minutes_before} мин. Нажми «Готово», когда разберешься.",
+                            f"Напоминаю за {minutes_before} мин. Нажми «Сделано», когда реально закроешь это.",
                             reply_markup=event_keyboard(event_id, "before", "task"),
                         )
                         sent.add(int(minutes_before))
@@ -58,7 +58,7 @@ async def send_due_notifications() -> None:
                 if current >= starts_at and (not next_ping or current >= next_ping):
                     await bot.send_message(
                         user_id,
-                        f"Задача «{title}» уже актуальна. Пока не нажмешь «Готово», я считаю, что она висит.",
+                        f"Задача «{title}» уже актуальна. Пока не нажмешь «Сделано», я считаю, что она висит.",
                         reply_markup=event_keyboard(event_id, "before", "task"),
                     )
                     await set_next_ping(event_id, current + timedelta(minutes=30))
@@ -77,7 +77,7 @@ async def send_due_notifications() -> None:
         for minutes_before in reminders:
             due_time = starts_at - timedelta(minutes=int(minutes_before))
             if current >= due_time and int(minutes_before) not in sent and not departed:
-                phase_text = "Вижу, Отложить, Изменить, Отменить — выбирай, а то я буду нервничать за нас обоих."
+                phase_text = "Вижу, Сделано, Отложить, Изменить, Отменить — выбирай, а то я буду нервничать за нас обоих."
                 await bot.send_message(
                     user_id,
                     f"Бро, {title} в {starts_at.strftime('%H:%M')}.\nДо старта примерно {minutes_before} мин. {phase_text}",
@@ -92,7 +92,7 @@ async def send_due_notifications() -> None:
                 interval = escalation_interval(starts_at, current, seen)
                 await bot.send_message(
                     user_id,
-                    f"Ты на мероприятии «{title}»? Пока не нажмешь «Я тут», я считаю, что тебя там нет.",
+                    f"Ты на мероприятии «{title}»? Нажми «Я тут», если ты на месте, или «Сделано», если вопрос уже закрыт.",
                     reply_markup=event_keyboard(event_id, "started", "event"),
                 )
                 await set_next_ping(event_id, current + timedelta(minutes=interval))
