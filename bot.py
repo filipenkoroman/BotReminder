@@ -153,6 +153,92 @@ async def record_api_usage(
         await db.commit()
 
 
+async def log_event(user_id: Optional[int], event_type: str, text: Optional[str] = None, payload: Optional[dict] = None) -> None:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """
+                INSERT INTO bot_logs(user_id, event_type, text, payload_json, created_at)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    event_type,
+                    text,
+                    json.dumps(payload or {}, ensure_ascii=False),
+                    now().isoformat(),
+                ),
+            )
+            await db.commit()
+    except Exception as exc:
+        print(f"log error: {exc}")
+
+
+async def save_learning_example(user_id: int, user_text: str, expected_behavior: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO learning_examples(user_id, user_text, expected_behavior, created_at)
+            VALUES(?, ?, ?, ?)
+            """,
+            (user_id, user_text.strip(), expected_behavior.strip(), now().isoformat()),
+        )
+        await db.commit()
+    await log_event(
+        user_id,
+        "learning_saved",
+        user_text,
+        {"expected_behavior": expected_behavior},
+    )
+
+
+async def recent_learning_examples(user_id: int, limit: int = 8) -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        rows = await (
+            await db.execute(
+                """
+                SELECT user_text, expected_behavior FROM learning_examples
+                WHERE user_id=?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            )
+        ).fetchall()
+    if not rows:
+        return ""
+    lines = ["Примеры обучения от пользователя. Учитывай их как предпочтения:"]
+    for user_text, expected in reversed(rows):
+        lines.append(f"- Если пользователь пишет: {user_text!r}, надо: {expected}")
+    return "\n".join(lines)
+
+
+async def send_recent_logs(message: Message, limit: int = 20) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        rows = await (
+            await db.execute(
+                """
+                SELECT created_at, event_type, text, payload_json FROM bot_logs
+                WHERE user_id=? OR user_id IS NULL
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (message.from_user.id, limit),
+            )
+        ).fetchall()
+    if not rows:
+        await message.answer("Лог пока пуст.")
+        return
+    lines = ["Последние события бота:"]
+    for created_at, event_type, text, payload_json in reversed(rows):
+        short_text = (text or "").replace("\n", " ")[:80]
+        payload = json.loads(payload_json or "{}")
+        action = payload.get("action") or payload.get("callback") or ""
+        suffix = f" -> {action}" if action else ""
+        lines.append(f"• {created_at[5:16]} · {event_type}{suffix} · {short_text}")
+    await message.answer("\n".join(lines[-30:]))
+
+
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -200,6 +286,29 @@ async def init_db() -> None:
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 audio_seconds REAL NOT NULL DEFAULT 0,
                 cost_usd REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                event_type TEXT NOT NULL,
+                text TEXT,
+                payload_json TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS learning_examples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                user_text TEXT NOT NULL,
+                expected_behavior TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
             """
@@ -446,6 +555,12 @@ def fallback_parse(text: str) -> ParsedIntent:
     base = now()
     starts_at = None
     date_was_given = False
+    relative_match = re.search(r"через\s+(\d+)\s*(минут|мин|час|часа|часов)", lower)
+    if relative_match:
+        value = int(relative_match.group(1))
+        minutes_delta = value * 60 if relative_match.group(2).startswith("час") else value
+        starts_at = (base + timedelta(minutes=minutes_delta)).isoformat()
+        assumptions.append(f"понял относительное время: через {minutes_delta} мин")
     if "завтра" in lower:
         base = base + timedelta(days=1)
         date_was_given = True
@@ -456,7 +571,7 @@ def fallback_parse(text: str) -> ParsedIntent:
         date_was_given = True
 
     hour, minute, vague_time = extract_time(lower)
-    if hour is not None and minute is not None:
+    if starts_at is None and hour is not None and minute is not None:
         candidate = base.replace(hour=hour, minute=minute)
         if not date_was_given:
             if candidate < now() - timedelta(minutes=15):
@@ -477,7 +592,7 @@ def fallback_parse(text: str) -> ParsedIntent:
         title=title or text,
         kind=kind,
         starts_at=starts_at,
-        reminders=default_reminders(text),
+        reminders=[5, 1] if relative_match else default_reminders(text),
         assumptions=assumptions,
         needs_time_question=needs_time,
         original_text=text,
@@ -490,6 +605,7 @@ async def ai_parse(text: str, user_id: int = 0) -> ParsedIntent:
     if not await api_budget_available(user_id):
         return fallback_parse(text)
 
+    learned = await recent_learning_examples(user_id)
     system = f"""
 Ты парсер личного Telegram-бота напоминаний. Сегодня {now().strftime('%Y-%m-%d %H:%M')}, часовой пояс Asia/Novosibirsk.
 Верни только JSON:
@@ -511,7 +627,9 @@ async def ai_parse(text: str, user_id: int = 0) -> ParsedIntent:
 Для "ближе к вечеру" ставь 18:00 сегодня, если время еще впереди, иначе завтра.
 Для "после обеда" ставь 14:00 сегодня, если время еще впереди, иначе завтра.
 Если время примерное, reminders=[60,30,15,10].
+Если пользователь пишет "через N минут/часов", поставь starts_at=N минут/часов от текущего времени, kind=event, reminders=[5,1] для коротких интервалов.
 Спрашивай уточнение только если вообще нет даты/времени или невозможно сделать полезную догадку.
+{learned}
 """
     try:
         response = await openai_client.chat.completions.create(
@@ -535,7 +653,7 @@ async def ai_parse(text: str, user_id: int = 0) -> ParsedIntent:
             cost_usd=text_cost_usd(OPENAI_MODEL, input_tokens, output_tokens),
         )
         payload = json.loads(response.choices[0].message.content or "{}")
-        return ParsedIntent(
+        parsed = ParsedIntent(
             action=payload.get("action", "unknown"),
             title=payload.get("title"),
             kind=payload.get("kind") or "event",
@@ -546,8 +664,12 @@ async def ai_parse(text: str, user_id: int = 0) -> ParsedIntent:
             needs_time_question=bool(payload.get("needs_time_question")),
             original_text=text,
         )
+        await log_event(user_id, "ai_parse", text, parsed.__dict__)
+        return parsed
     except Exception:
-        return fallback_parse(text)
+        parsed = fallback_parse(text)
+        await log_event(user_id, "fallback_parse_after_ai_error", text, parsed.__dict__)
+        return parsed
 
 
 async def transcribe_voice(message: Message) -> Optional[str]:
@@ -638,6 +760,7 @@ async def create_event(user_id: int, parsed: ParsedIntent) -> int:
 
 async def finish_create(message: Message, parsed: ParsedIntent) -> None:
     event_id = await create_event(message.from_user.id, parsed)
+    await log_event(message.from_user.id, "event_created", parsed.original_text, {"event_id": event_id, **parsed.__dict__})
     if parsed.kind == "task":
         text = f"Записал задачу: {parsed.title}\nПинги: утром каждый день, пока не нажмешь «Готово»."
         await message.answer(text, reply_markup=event_keyboard(event_id, "before", "task"))
@@ -791,6 +914,7 @@ async def ai_command_intent(text: str, focus_title: str, user_id: int) -> Option
     if not openai_client or not await api_budget_available(user_id):
         return None
 
+    learned = await recent_learning_examples(user_id)
     system = f"""
 Ты классификатор команд для Telegram-бота напоминаний.
 Сейчас пользователь может говорить либо новую задачу, либо команду к текущему событию.
@@ -817,6 +941,7 @@ async def ai_command_intent(text: str, focus_title: str, user_id: int) -> Option
 - Если просит перенести на конкретное время, action=reschedule и starts_at ISO.
 - Если непонятно, но похоже на команду к текущему событию, action=ask и короткий question.
 - Если это явно новая задача/событие, action=new.
+{learned}
 """
     try:
         response = await openai_client.chat.completions.create(
@@ -840,7 +965,7 @@ async def ai_command_intent(text: str, focus_title: str, user_id: int) -> Option
             cost_usd=text_cost_usd(OPENAI_MODEL, input_tokens, output_tokens),
         )
         payload = json.loads(response.choices[0].message.content or "{}")
-        return CommandIntent(
+        intent = CommandIntent(
             action=payload.get("action", "new"),
             confidence=float(payload.get("confidence") or 0),
             minutes=payload.get("minutes"),
@@ -848,12 +973,21 @@ async def ai_command_intent(text: str, focus_title: str, user_id: int) -> Option
             question=payload.get("question"),
             assumptions=payload.get("assumptions") or [],
         )
+        await log_event(user_id, "ai_command_intent", text, intent.__dict__)
+        return intent
     except Exception:
+        await log_event(user_id, "ai_command_error", text, {"focus_title": focus_title})
         return None
 
 
 async def apply_command_intent(message: Message, focus, intent: CommandIntent) -> bool:
     event_id, title, kind, starts_at, _reminders, _sent, _seen, _departed, _confirmed, _done = focus
+    await log_event(
+        message.from_user.id,
+        "command_apply",
+        message.text or "",
+        {"event_id": event_id, "title": title, **intent.__dict__},
+    )
     if intent.action == "new":
         return False
     if intent.action == "ask":
@@ -989,6 +1123,17 @@ async def handle_text(message: Message, text: str) -> None:
     if not owner_allowed(message):
         await message.answer("Этот бот пока личный. Я чужих не трогаю.")
         return
+    await log_event(message.from_user.id, "user_text", text)
+
+    learning_match = re.match(
+        r"(?is)^(?:запомни|научись|это надо было понять как|это нужно понимать как)\s*[:\-]?\s*(.+?)\s*(?:=>|->|как|значит)\s*(.+)$",
+        text.strip(),
+    )
+    if learning_match:
+        user_text, expected = learning_match.group(1).strip(), learning_match.group(2).strip()
+        await save_learning_example(message.from_user.id, user_text, expected)
+        await message.answer("Запомнил этот кейс. В следующих разборах буду учитывать.")
+        return
 
     if await handle_quick_reply(message, text):
         return
@@ -1011,6 +1156,7 @@ async def handle_text(message: Message, text: str) -> None:
         return
 
     if parsed.action != "create":
+        await log_event(message.from_user.id, "unknown_intent", text, parsed.__dict__)
         await message.answer("Я не до конца понял. Скажи проще: что, когда и как часто напоминать?")
         return
 
@@ -1213,6 +1359,28 @@ async def send_api_stats(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
+async def send_learning_examples(message: Message) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        rows = await (
+            await db.execute(
+                """
+                SELECT user_text, expected_behavior, created_at FROM learning_examples
+                WHERE user_id=?
+                ORDER BY id DESC
+                LIMIT 10
+                """,
+                (message.from_user.id,),
+            )
+        ).fetchall()
+    if not rows:
+        await message.answer("Пока нет сохраненных кейсов обучения.")
+        return
+    lines = ["Чему я уже научился:"]
+    for user_text, expected, created_at in reversed(rows):
+        lines.append(f"• {created_at[5:16]}: {user_text} -> {expected}")
+    await message.answer("\n".join(lines))
+
+
 async def get_event(event_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         return await (
@@ -1233,7 +1401,8 @@ async def start(message: Message) -> None:
         "Например: «Стоматолог завтра в 10, напомни за час и за 30 минут».\n"
         "Чтобы управлять событиями кнопками, напиши /list или «список».\n"
         "Чтобы увидеть только срочное, напиши /hot или «что горит».\n"
-        "Чтобы проверить расходы API, напиши /cost."
+        "Чтобы проверить расходы API, напиши /cost.\n"
+        "Чтобы посмотреть логи, напиши /logs."
     )
 
 
@@ -1267,6 +1436,16 @@ async def cost(message: Message) -> None:
     await send_api_stats(message)
 
 
+@dp.message(Command("logs"))
+async def logs(message: Message) -> None:
+    await send_recent_logs(message)
+
+
+@dp.message(Command("learned"))
+async def learned(message: Message) -> None:
+    await send_learning_examples(message)
+
+
 @dp.message(F.voice)
 async def voice(message: Message) -> None:
     text = await transcribe_voice(message)
@@ -1283,6 +1462,7 @@ async def text(message: Message) -> None:
 @dp.callback_query()
 async def callbacks(query: CallbackQuery) -> None:
     data = query.data or ""
+    await log_event(query.from_user.id, "callback", data, {"callback": data})
     if data.startswith("list:"):
         _action, scope = data.split(":", 1)
         await send_calendar_to_chat(query.message.chat.id, query.from_user.id, scope)
