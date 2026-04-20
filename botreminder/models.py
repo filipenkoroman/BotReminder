@@ -22,5 +22,6 @@ class CommandIntent:
     confidence: float = 0
     minutes: Optional[int] = None
     starts_at: Optional[str] = None
+    title: Optional[str] = None
     question: Optional[str] = None
     assumptions: Optional[List[str]] = None

@@ -48,9 +48,9 @@ async def send_due_notifications() -> None:
                     if current >= due_time and int(minutes_before) not in sent:
                         await bot.send_message(
                             user_id,
-                            f"Бро, задача «{title}» актуальна в {starts_at.strftime('%H:%M')}.\n"
+                            f"Бро, «{title}» актуально в {starts_at.strftime('%H:%M')}.\n"
                             f"Напоминаю за {minutes_before} мин. Нажми «Сделано», когда реально закроешь это.",
-                            reply_markup=event_keyboard(event_id, "before", "task"),
+                            reply_markup=event_keyboard(event_id, "before", kind, starts_at_raw, title),
                         )
                         sent.add(int(minutes_before))
                         await update_sent(event_id, sorted(sent, reverse=True))
@@ -58,14 +58,14 @@ async def send_due_notifications() -> None:
                 if current >= starts_at and (not next_ping or current >= next_ping):
                     await bot.send_message(
                         user_id,
-                        f"Задача «{title}» уже актуальна. Пока не нажмешь «Сделано», я считаю, что она висит.",
-                        reply_markup=event_keyboard(event_id, "before", "task"),
+                        f"«{title}» уже актуально. Пока не нажмешь «Сделано», я считаю, что это висит.",
+                        reply_markup=event_keyboard(event_id, "before", kind, starts_at_raw, title),
                     )
                     await set_next_ping(event_id, current + timedelta(minutes=30))
                 continue
             last_ping = parse_dt(last_ping_raw)
             if not last_ping or last_ping.date() < current.date() and current.hour >= 9:
-                await bot.send_message(user_id, f"Бро, задача еще висит: {title}", reply_markup=event_keyboard(event_id, "before", "task"))
+                await bot.send_message(user_id, f"Бро, еще висит: {title}", reply_markup=event_keyboard(event_id, "before", kind, starts_at_raw, title))
                 await mark_ping(event_id)
             continue
 
@@ -77,11 +77,11 @@ async def send_due_notifications() -> None:
         for minutes_before in reminders:
             due_time = starts_at - timedelta(minutes=int(minutes_before))
             if current >= due_time and int(minutes_before) not in sent and not departed:
-                phase_text = "Вижу, Сделано, Отложить, Изменить, Отменить — выбирай, а то я буду нервничать за нас обоих."
+                phase_text = "Выбирай: 👀 Вижу, 🚶 Еду, ✅ Сделано, ⏰ Позже или ✏️ Править."
                 await bot.send_message(
                     user_id,
                     f"Бро, {title} в {starts_at.strftime('%H:%M')}.\nДо старта примерно {minutes_before} мин. {phase_text}",
-                    reply_markup=event_keyboard(event_id, "before", "event"),
+                    reply_markup=event_keyboard(event_id, "before", kind, starts_at_raw, title),
                 )
                 sent.add(int(minutes_before))
                 await update_sent(event_id, sorted(sent, reverse=True))
@@ -92,8 +92,8 @@ async def send_due_notifications() -> None:
                 interval = escalation_interval(starts_at, current, seen)
                 await bot.send_message(
                     user_id,
-                    f"Ты на мероприятии «{title}»? Нажми «Я тут», если ты на месте, или «Сделано», если вопрос уже закрыт.",
-                    reply_markup=event_keyboard(event_id, "started", "event"),
+                    f"Ты уже на месте по «{title}»? Нажми «На месте», если ты там, или «Сделано», если вопрос уже закрыт.",
+                    reply_markup=event_keyboard(event_id, "started", kind, starts_at_raw, title),
                 )
                 await set_next_ping(event_id, current + timedelta(minutes=interval))
 

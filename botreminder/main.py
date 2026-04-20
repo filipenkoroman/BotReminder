@@ -5,6 +5,7 @@ from aiogram.types import BotCommand
 from . import handlers  # noqa: F401 - registers aiogram handlers
 from .config import TELEGRAM_BOT_TOKEN, bot, dp
 from .db import init_db
+from .google_sync import sync_existing_google_events
 from .scheduler import scheduler_loop
 
 
@@ -28,6 +29,7 @@ async def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("Нужен TELEGRAM_BOT_TOKEN в .env. Его дает @BotFather в Telegram.")
     await init_db()
+    await sync_existing_google_events()
     await set_bot_commands()
     asyncio.create_task(scheduler_loop())
     await dp.start_polling(bot)

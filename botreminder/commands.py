@@ -13,19 +13,42 @@ from .db import (
     mark_event_departed,
     mark_event_seen,
     mark_task_done,
+    normalize_title,
     recent_learning_examples,
     record_api_usage,
     snooze_event_to,
+    update_event_title,
 )
 from .keyboards import confirm_delete_keyboard
+from .google_sync import sync_google_event
 from .models import CommandIntent
 from .parsing import time_from_text
 from .pricing import rough_token_count, text_cost_usd
 from .time_utils import now, parse_dt
 
 
+def has_phrase(text: str, phrase: str) -> bool:
+    return bool(re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", text))
+
+
+def has_any_phrase(text: str, phrases: list[str]) -> bool:
+    return any(has_phrase(text, phrase) for phrase in phrases)
+
+
 def local_command_intent(text: str) -> Optional[CommandIntent]:
     lower = text.lower().strip(" .,!?:;")
+    rename_match = re.search(
+        r"^(?:измени|изменить|поменяй|поменять|переименуй|переименовать)\s+(?:название|имя|текст)?\s*(?:(?:на|в)\s+|[:\-–—]\s*)(.+)$",
+        text.strip(" .,!?:;"),
+        flags=re.I,
+    )
+    if rename_match:
+        return CommandIntent(
+            action="rename",
+            confidence=0.95,
+            title=rename_match.group(1).strip(" .,:;«»\""),
+        )
+
     done_words = [
         "выполнена",
         "выполнено",
@@ -35,23 +58,24 @@ def local_command_intent(text: str) -> Optional[CommandIntent]:
         "закрыть",
         "закрой",
         "готово",
+        "сделано",
         "сделал",
         "задача готова",
         "можешь завершить",
     ]
-    if any(word in lower for word in done_words):
+    if has_any_phrase(lower, done_words):
         return CommandIntent(action="done", confidence=0.95, assumptions=["понял как команду закрыть текущую задачу или событие"])
 
-    if any(phrase in lower for phrase in ["отмени это", "удали это", "удалить задачу", "удали задачу"]):
+    if has_any_phrase(lower, ["отмени это", "удали это", "удалить задачу", "удали задачу"]):
         return CommandIntent(action="delete", confidence=0.95)
 
-    if any(phrase in lower for phrase in ["я на месте", "на месте", "я тут", "приехал", "пришел"]):
+    if has_any_phrase(lower, ["я на месте", "на месте", "я тут", "приехал", "пришел"]):
         return CommandIntent(action="arrived", confidence=0.95)
 
-    if any(phrase in lower for phrase in ["вижу", "понял", "принял", "увидел"]):
+    if has_any_phrase(lower, ["вижу", "понял", "принял", "увидел"]):
         return CommandIntent(action="seen", confidence=0.9)
 
-    if any(phrase in lower for phrase in ["выезжаю", "выехал", "еду", "выдвигаюсь"]):
+    if has_any_phrase(lower, ["выезжаю", "выехал", "еду", "выдвигаюсь"]):
         return CommandIntent(action="departed", confidence=0.9)
 
     if lower.startswith(("перенеси", "перенести", "отложи", "отложить")):
@@ -79,10 +103,11 @@ async def ai_command_intent(text: str, focus_title: str, user_id: int) -> Option
 
 Верни только JSON:
 {{
-  "action": "done|delete|seen|departed|arrived|snooze|reschedule|ask|new",
+  "action": "done|delete|seen|departed|arrived|snooze|reschedule|rename|ask|new",
   "confidence": 0.0,
   "minutes": null,
   "starts_at": null,
+  "title": null,
   "question": null,
   "assumptions": []
 }}
@@ -95,6 +120,9 @@ async def ai_command_intent(text: str, focus_title: str, user_id: int) -> Option
 - Если "я тут/на месте/приехал", action=arrived.
 - Если просит перенести на относительное время, action=snooze и minutes.
 - Если просит перенести на конкретное время, action=reschedule и starts_at ISO.
+- Если просит изменить название, переименовать, исправить текст или назвать иначе, action=rename и title=новое название.
+- Если текст выглядит как новое короткое название после режима редактирования, тоже action=rename и title=этот текст.
+- Фразы вида "поменяй название - Оплата за гараж родителей" или "поменяй название: Оплата за гараж родителей" — это action=rename.
 - Если непонятно, но похоже на команду к текущему событию, action=ask и короткий question.
 - Если это явно новая задача/событие, action=new.
 {learned}
@@ -126,6 +154,7 @@ async def ai_command_intent(text: str, focus_title: str, user_id: int) -> Option
             confidence=float(payload.get("confidence") or 0),
             minutes=payload.get("minutes"),
             starts_at=payload.get("starts_at"),
+            title=payload.get("title"),
             question=payload.get("question"),
             assumptions=payload.get("assumptions") or [],
         )
@@ -146,40 +175,48 @@ async def apply_command_intent(message: Message, focus, intent: CommandIntent) -
     if intent.action == "new":
         return False
     if intent.action == "ask":
-        await message.answer(intent.question or "Ты про текущее событие или это новая задача?")
+        await message.answer(intent.question or "Ты про текущее напоминание или хочешь создать новое?")
         return True
     if intent.action == "done":
         if kind == "task":
             await mark_task_done(event_id)
-            await message.answer(f"Сделано, закрыл задачу: {title}.")
+            await message.answer(f"Сделано, закрыл: {normalize_title(title)}.")
         else:
             await mark_event_arrived(event_id)
-            await message.answer(f"Сделано, закрыл событие: {title}. Больше по нему не пингую.")
+            await message.answer(f"Сделано, закрыл: {normalize_title(title)}. Больше по нему не пингую.")
+        await sync_google_event(event_id)
         return True
     if intent.action == "delete":
-        await message.answer(f"Удаляем «{title}»?", reply_markup=confirm_delete_keyboard(event_id))
+        await message.answer(f"Удаляем «{normalize_title(title)}»?", reply_markup=confirm_delete_keyboard(event_id))
+        return True
+    if intent.action == "rename" and intent.title:
+        await update_event_title(event_id, intent.title)
+        await sync_google_event(event_id)
+        await message.answer(f"Переименовал: {normalize_title(intent.title)}.")
         return True
     if intent.action == "seen":
         await mark_event_seen(event_id)
-        await message.answer(f"Принял по «{title}»: ты видел.")
+        await message.answer(f"Принял по «{normalize_title(title)}»: ты видел.")
         return True
     if intent.action == "departed":
         await mark_event_departed(event_id)
-        await message.answer(f"Отметил по «{title}»: ты выдвинулся. До старта не душню.")
+        await message.answer(f"Отметил по «{normalize_title(title)}»: ты выдвинулся. До старта не душню.")
         return True
     if intent.action == "arrived":
         await mark_event_arrived(event_id)
-        await message.answer(f"Красавчик, зафиксировал: ты на месте по «{title}».")
+        await message.answer(f"Красавчик, зафиксировал: ты на месте по «{normalize_title(title)}».")
         return True
     if intent.action == "snooze" and intent.minutes:
         new_start = (parse_dt(starts_at) or now()) + timedelta(minutes=int(intent.minutes))
         await snooze_event_to(event_id, new_start)
-        await message.answer(f"Отложил «{title}» на {intent.minutes} мин. Новое время: {new_start.strftime('%d.%m %H:%M')}.")
+        await sync_google_event(event_id)
+        await message.answer(f"Отложил «{normalize_title(title)}» на {intent.minutes} мин. Новое время: {new_start.strftime('%d.%m %H:%M')}.")
         return True
     if intent.action == "reschedule" and intent.starts_at:
         new_start = parse_dt(intent.starts_at)
         if new_start:
             await snooze_event_to(event_id, new_start)
-            await message.answer(f"Перенес «{title}» на {new_start.strftime('%d.%m %H:%M')}.")
+            await sync_google_event(event_id)
+            await message.answer(f"Перенес «{normalize_title(title)}» на {new_start.strftime('%d.%m %H:%M')}.")
             return True
     return False

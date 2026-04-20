@@ -18,11 +18,16 @@ from .db import (
     mark_event_seen,
     mark_task_done,
     pop_pending_question,
+    pop_pending_edit,
     save_learning_example,
+    save_pending_edit,
     save_pending_question,
     snooze_event_to,
+    update_event_title,
+    normalize_title,
 )
 from .keyboards import confirm_delete_keyboard, manage_keyboard, snooze_keyboard
+from .google_sync import sync_google_event
 from .models import ParsedIntent
 from .parsing import (
     ai_parse,
@@ -49,8 +54,67 @@ from .views import (
 def owner_allowed(message: Message) -> bool:
     return not BOT_OWNER_ID or str(message.from_user.id) == BOT_OWNER_ID
 
+def looks_like_plain_title(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped or len(stripped) > 120:
+        return False
+    lower = stripped.lower()
+    command_starts = (
+        "напомни",
+        "напоминай",
+        "создай",
+        "запиши",
+        "перенеси",
+        "отложи",
+        "удали",
+        "отмени",
+        "сделано",
+        "готово",
+    )
+    if lower.startswith(command_starts):
+        return False
+    return True
+
+async def handle_pending_edit(message: Message, event_id: int, text: str) -> bool:
+    row = await get_event(event_id)
+    if not row:
+        await message.answer("Не нашел это напоминание. Открой его из списка еще раз.")
+        return True
+
+    _id, _user_id, title, kind, starts_at, reminders, sent, seen, departed, confirmed, done = row
+    focus = (_id, title, kind, starts_at, reminders, sent, seen, departed, confirmed, done)
+    lower = text.lower().strip(" .,!?:;")
+    if lower in {"отмена", "отбой", "ничего", "не надо"}:
+        await message.answer("Окей, редактирование отменил.")
+        return True
+
+    local_intent = local_command_intent(text)
+    if local_intent and await apply_command_intent(message, focus, local_intent):
+        return True
+
+    ai_intent = await ai_command_intent(text, title, message.from_user.id)
+    if ai_intent and ai_intent.confidence >= 0.55 and ai_intent.action != "new":
+        return await apply_command_intent(message, focus, ai_intent)
+
+    if looks_like_plain_title(text):
+        await update_event_title(event_id, text)
+        await sync_google_event(event_id)
+        await message.answer(f"Переименовал: {normalize_title(text)}.")
+        return True
+
+    await save_pending_edit(message.from_user.id, event_id)
+    await message.answer(
+        "Я не до конца понял, что правим. Можно так:\n"
+        "«Оплата за гараж родителей»\n"
+        "«Поменяй название - Оплата за гараж родителей»\n"
+        "«Перенеси на завтра в 15:00»"
+    )
+    return True
+
 async def handle_quick_reply(message: Message, text: str) -> bool:
     lower = text.lower().strip(" .,!?:;")
+    if lower.startswith(("напомни", "напоминай", "запиши", "создай", "поставь")):
+        return False
     if lower in {"help", "помощь", "команды", "меню", "что ты умеешь", "что умеешь"}:
         await message.answer(HELP_TEXT)
         return True
@@ -85,6 +149,9 @@ async def handle_quick_reply(message: Message, text: str) -> bool:
             "перенес",
             "отлож",
             "выполн",
+            "измен",
+            "переимен",
+            "назван",
         ]
     )
     if commandish:
@@ -92,11 +159,11 @@ async def handle_quick_reply(message: Message, text: str) -> bool:
         if ai_intent and ai_intent.confidence >= 0.55:
             return await apply_command_intent(message, focus, ai_intent)
         if ai_intent and ai_intent.action == "ask":
-            await message.answer(ai_intent.question or "Я не до конца понял: это команда к текущему событию?")
+            await message.answer(ai_intent.question or "Я не до конца понял: это команда к текущему напоминанию?")
             return True
         await message.answer(
             f"Я не до конца понял. Ты хочешь что-то сделать с «{title}»?",
-            reply_markup=manage_keyboard(event_id, _kind, "before"),
+            reply_markup=manage_keyboard(event_id, _kind, "before", _starts_at, title),
         )
         return True
 
@@ -117,6 +184,11 @@ async def handle_text(message: Message, text: str) -> None:
         await save_learning_example(message.from_user.id, user_text, expected)
         await message.answer("Запомнил этот кейс. В следующих разборах буду учитывать.")
         return
+
+    pending_edit_event_id = await pop_pending_edit(message.from_user.id)
+    if pending_edit_event_id:
+        if await handle_pending_edit(message, pending_edit_event_id, text):
+            return
 
     if await handle_quick_reply(message, text):
         return
@@ -154,7 +226,7 @@ async def handle_text(message: Message, text: str) -> None:
         return
 
     if parsed.needs_time_question and not parsed.starts_at:
-        question = "Когда тебя пинать по этой задаче? Могу утром каждый день, пока не нажмешь «Сделано»."
+        question = "Когда тебя пинать по этому напоминанию? Могу утром каждый день, пока не нажмешь «Сделано»."
         await save_pending_question(message.from_user.id, parsed, question)
         await message.answer(question)
         return
@@ -275,7 +347,7 @@ async def callbacks(query: CallbackQuery) -> None:
     event_id = int(event_id_raw)
     row = await get_event(event_id)
     if not row:
-        await query.answer("Не нашел событие")
+        await query.answer("Не нашел напоминание")
         return
 
     if action == "seen":
@@ -286,6 +358,7 @@ async def callbacks(query: CallbackQuery) -> None:
         await query.message.answer("Принял, выдвинулся. До старта не душню.")
     elif action == "arrived":
         await mark_event_arrived(event_id)
+        await sync_google_event(event_id)
         await query.message.answer("Красавчик, зафиксировал: ты на месте.")
     elif action == "late":
         async with aiosqlite.connect(DB_PATH) as db:
@@ -298,7 +371,8 @@ async def callbacks(query: CallbackQuery) -> None:
             await query.message.answer("Сделано. Вычеркиваю.")
         else:
             await mark_event_arrived(event_id)
-            await query.message.answer("Сделано, закрыл событие. Больше по нему не пингую.")
+            await query.message.answer("Сделано, закрыл. Больше по нему не пингую.")
+        await sync_google_event(event_id)
     elif action == "snooze":
         await query.message.answer("На сколько отложить?", reply_markup=snooze_keyboard(event_id))
     elif action == "snooze_set":
@@ -307,17 +381,29 @@ async def callbacks(query: CallbackQuery) -> None:
         current_start = parse_dt(row[4]) or now()
         new_start = current_start + timedelta(minutes=minutes)
         await snooze_event_to(event_id, new_start)
+        await sync_google_event(event_id)
         await query.message.answer(f"Отложил. Новое время: {new_start.strftime('%d.%m %H:%M')}")
     elif action == "snooze_at":
         new_start = named_snooze_time(rest[0])
         await snooze_event_to(event_id, new_start)
+        await sync_google_event(event_id)
         await query.message.answer(f"Перенес. Новое время: {new_start.strftime('%d.%m %H:%M')}")
     elif action == "cancel":
         await query.message.answer("Точно удалить?", reply_markup=confirm_delete_keyboard(event_id))
     elif action == "confirm_cancel":
         await cancel_event(event_id)
+        await sync_google_event(event_id)
         await query.message.answer("Удалил.")
         await send_calendar_to_chat(query.message.chat.id, query.from_user.id, "all")
     elif action == "edit":
-        await query.message.answer("Редактирование голосом уже можно пробовать: скажи «перенеси ...». Кнопочную правку добавлю следующей итерацией.")
+        await save_pending_edit(query.from_user.id, event_id)
+        await query.message.answer(
+            "Что изменить?\n"
+            "Можно просто написать новое название:\n"
+            "«Оплата за гараж родителей»\n\n"
+            "Или командой:\n"
+            "«Поменяй название - Оплата за гараж родителей»\n"
+            "«Перенеси на завтра в 15:00»\n"
+            "«Отложи на 30 минут»"
+        )
     await query.answer()

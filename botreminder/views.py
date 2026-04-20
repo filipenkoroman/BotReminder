@@ -11,7 +11,9 @@ from .db import (
     get_event,
     log_event,
     month_api_spend,
+    normalize_title,
 )
+from .google_sync import sync_google_event
 from .keyboards import calendar_keyboard, confirm_delete_keyboard, event_keyboard, manage_keyboard
 from .models import ParsedIntent
 from .time_utils import fmt_dt, month_start_iso, now, parse_dt
@@ -22,47 +24,54 @@ HELP_TEXT = """Что я умею:
 /today — что сегодня
 /week — ближайшая неделя
 /month — ближайший месяц
-/list — все активные задачи и события
+/list — все активные напоминания
 /hot — что горит прямо сейчас
 /cost — расходы OpenAI API
 /logs — последние действия бота
 /learned — чему я уже научился
 /help — это меню
 
+Кнопки:
+👀 Вижу — я заметил напоминание
+🚶 Еду — уже выдвинулся
+📍 На месте — я уже там
+✅ Сделано — закрыл, больше не пинговать
+⏰ Позже — отложить
+✏️ Править — изменить название или время
+← Список — вернуться к списку
+
 Можно писать обычным языком:
 «Стоматолог завтра в 10, напомни за час и за 30 минут»
 «Напомни что каждого 15 числа будет оплата за личный чат джпт»
 «Купить подарок на неделе»
 «Удали встречу с Сашей»
-«Эта задача выполнена»
+«Сделано»
 
 Для повторов я спрошу, когда перестать повторять: навсегда, до 1 сентября или на 3 месяца."""
 
 
 async def finish_create(message: Message, parsed: ParsedIntent) -> None:
     event_id = await create_event(message.from_user.id, parsed)
+    await sync_google_event(event_id)
     await log_event(message.from_user.id, "event_created", parsed.original_text, {"event_id": event_id, **parsed.__dict__})
+    title = normalize_title(parsed.title)
     if parsed.kind == "task":
         if parsed.starts_at:
             text = (
-                f"Записал задачу: {parsed.title}\n"
+                f"Записал: {title}\n"
                 f"Когда: {fmt_dt(parsed.starts_at)}\n"
                 f"Напомню: {', '.join(str(x) + ' мин' for x in (parsed.reminders or [60, 30]))}."
             )
             if parsed.repeat_rule:
                 text += repeat_text(parsed)
         else:
-            text = f"Записал задачу: {parsed.title}\nПинги: утром каждый день, пока не нажмешь «Сделано»."
-        if parsed.assumptions:
-            text += "\nЯ предположил: " + "; ".join(parsed.assumptions) + "."
-        await message.answer(text, reply_markup=event_keyboard(event_id, "before", "task"))
+            text = f"Записал: {title}\nПинги: утром каждый день, пока не нажмешь «Сделано»."
+        await message.answer(text, reply_markup=event_keyboard(event_id, "before", parsed.kind, parsed.starts_at, title))
     else:
-        text = f"Записал: {parsed.title}\nКогда: {fmt_dt(parsed.starts_at)}\nНапомню: {', '.join(str(x) + ' мин' for x in (parsed.reminders or [60, 30]))}."
+        text = f"Записал: {title}\nКогда: {fmt_dt(parsed.starts_at)}\nНапомню: {', '.join(str(x) + ' мин' for x in (parsed.reminders or [60, 30]))}."
         if parsed.repeat_rule:
             text += repeat_text(parsed)
-        if parsed.assumptions:
-            text += "\nЯ предположил: " + "; ".join(parsed.assumptions) + "."
-        await message.answer(text, reply_markup=event_keyboard(event_id, "before", "event"))
+        await message.answer(text, reply_markup=event_keyboard(event_id, "before", parsed.kind, parsed.starts_at, title))
 
 def repeat_text(parsed: ParsedIntent) -> str:
     if parsed.repeat_until == "never":
@@ -85,13 +94,13 @@ async def ask_delete(message: Message, query: str) -> None:
             )
         ).fetchall()
     if not rows:
-        await message.answer("Не нашел похожее событие. Скажи название чуть точнее.")
+        await message.answer("Не нашел похожее напоминание. Скажи название чуть точнее.")
         return
     if len(rows) == 1:
         event_id, title, _starts_at, _kind = rows[0]
-        await message.answer(f"Удаляем «{title}»?", reply_markup=confirm_delete_keyboard(event_id))
+        await message.answer(f"Удаляем «{normalize_title(title)}»?", reply_markup=confirm_delete_keyboard(event_id))
         return
-    buttons = [[InlineKeyboardButton(text=f"{title} · {fmt_dt(starts_at)}", callback_data=f"open:{event_id}")]
+    buttons = [[InlineKeyboardButton(text=f"{normalize_title(title)} · {fmt_dt(starts_at)}", callback_data=f"open:{event_id}")]
                for event_id, title, starts_at, _kind in rows]
     await message.answer("Нашел несколько похожих. Какое открыть для удаления?", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
@@ -101,10 +110,9 @@ async def send_calendar(message: Message, scope: str) -> None:
         await message.answer("Пусто. Приятная редкость.")
         return
     lines = ["Что горит:" if scope == "hot" else "Вот что вижу:"]
-    for _id, title, kind, starts_at, _status in rows:
-        marker = "задача" if kind == "task" else "событие"
-        lines.append(f"• {fmt_dt(starts_at)} · {marker} · {title}")
-    lines.append("\nТыкни на событие ниже, и я дам кнопки управления.")
+    for _id, title, _kind, starts_at, _status in rows:
+        lines.append(f"• {fmt_dt(starts_at)} · {normalize_title(title)}")
+    lines.append("\nТыкни ниже, и я дам кнопки управления.")
     await message.answer("\n".join(lines), reply_markup=calendar_keyboard(rows))
 
 async def send_calendar_to_chat(chat_id: int, user_id: int, scope: str) -> None:
@@ -113,15 +121,14 @@ async def send_calendar_to_chat(chat_id: int, user_id: int, scope: str) -> None:
         await bot.send_message(chat_id, "Пусто. Приятная редкость.")
         return
     lines = ["Что горит:" if scope == "hot" else "Вот список для управления:"]
-    for _id, title, kind, starts_at, _status in rows:
-        marker = "задача" if kind == "task" else "событие"
-        lines.append(f"• {fmt_dt(starts_at)} · {marker} · {title}")
+    for _id, title, _kind, starts_at, _status in rows:
+        lines.append(f"• {fmt_dt(starts_at)} · {normalize_title(title)}")
     await bot.send_message(chat_id, "\n".join(lines), reply_markup=calendar_keyboard(rows))
 
 async def send_event_details(chat_id: int, event_id: int) -> None:
     row = await get_event(event_id)
     if not row:
-        await bot.send_message(chat_id, "Не нашел событие.")
+        await bot.send_message(chat_id, "Не нашел напоминание.")
         return
     _id, _user_id, title, kind, starts_at, reminders_raw, _sent_raw, seen, departed, confirmed, done = row
     reminders = ", ".join(str(x) + " мин" for x in json.loads(reminders_raw))
@@ -136,13 +143,12 @@ async def send_event_details(chat_id: int, event_id: int) -> None:
         status_bits.append("сделано")
     phase = "started" if starts_at and parse_dt(starts_at) and now() >= parse_dt(starts_at) else "before"
     text = (
-        f"{title}\n"
-        f"Тип: {'задача' if kind == 'task' else 'событие'}\n"
+        f"{normalize_title(title)}\n"
         f"Когда: {fmt_dt(starts_at)}\n"
         f"Напоминания: {reminders}\n"
         f"Статус: {', '.join(status_bits) if status_bits else 'активно'}"
     )
-    await bot.send_message(chat_id, text, reply_markup=manage_keyboard(event_id, kind, phase))
+    await bot.send_message(chat_id, text, reply_markup=manage_keyboard(event_id, kind, phase, starts_at, title))
 
 async def send_api_stats(message: Message) -> None:
     spend = await month_api_spend(message.from_user.id)

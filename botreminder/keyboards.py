@@ -1,44 +1,33 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from .db import normalize_title
 from .time_utils import fmt_dt
 
 
-def event_keyboard(event_id: int, phase: str, kind: str) -> InlineKeyboardMarkup:
-    if kind == "task":
-        rows = [
-            [InlineKeyboardButton(text="Сделано", callback_data=f"done:{event_id}")],
-            [
-                InlineKeyboardButton(text="Отложить", callback_data=f"snooze:{event_id}"),
-                InlineKeyboardButton(text="Отменить", callback_data=f"cancel:{event_id}"),
-            ],
-        ]
-        return InlineKeyboardMarkup(inline_keyboard=rows)
-
+def event_keyboard(event_id: int, phase: str, kind: str, starts_at: str = None, title: str = None) -> InlineKeyboardMarkup:
     if phase == "started":
         rows = [
             [
-                InlineKeyboardButton(text="Я тут", callback_data=f"arrived:{event_id}"),
-                InlineKeyboardButton(text="Сделано", callback_data=f"done:{event_id}"),
+                InlineKeyboardButton(text="📍 На месте", callback_data=f"arrived:{event_id}"),
+                InlineKeyboardButton(text="🚶 Еду", callback_data=f"departed:{event_id}"),
             ],
             [
-                InlineKeyboardButton(text="Опаздываю", callback_data=f"late:{event_id}"),
-                InlineKeyboardButton(text="Отложить", callback_data=f"snooze:{event_id}"),
+                InlineKeyboardButton(text="✅ Сделано", callback_data=f"done:{event_id}"),
+                InlineKeyboardButton(text="⏰ Позже", callback_data=f"snooze:{event_id}"),
             ],
-            [InlineKeyboardButton(text="Отменить", callback_data=f"cancel:{event_id}")],
         ]
     else:
         rows = [
             [
-                InlineKeyboardButton(text="Вижу", callback_data=f"seen:{event_id}"),
-                InlineKeyboardButton(text="Выдвигаюсь", callback_data=f"departed:{event_id}"),
+                InlineKeyboardButton(text="👀 Вижу", callback_data=f"seen:{event_id}"),
+                InlineKeyboardButton(text="🚶 Еду", callback_data=f"departed:{event_id}"),
             ],
-            [InlineKeyboardButton(text="Сделано", callback_data=f"done:{event_id}")],
             [
-                InlineKeyboardButton(text="Отложить", callback_data=f"snooze:{event_id}"),
-                InlineKeyboardButton(text="Изменить", callback_data=f"edit:{event_id}"),
+                InlineKeyboardButton(text="✅ Сделано", callback_data=f"done:{event_id}"),
+                InlineKeyboardButton(text="⏰ Позже", callback_data=f"snooze:{event_id}"),
             ],
-            [InlineKeyboardButton(text="Отменить", callback_data=f"cancel:{event_id}")],
         ]
+    rows.append([InlineKeyboardButton(text="✏️ Править", callback_data=f"edit:{event_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def snooze_keyboard(event_id: int) -> InlineKeyboardMarkup:
@@ -54,7 +43,7 @@ def snooze_keyboard(event_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="+1 час", callback_data=f"snooze_set:{event_id}:60"),
-                InlineKeyboardButton(text="Сегодня вечером", callback_data=f"snooze_at:{event_id}:evening"),
+                InlineKeyboardButton(text="Вечером", callback_data=f"snooze_at:{event_id}:evening"),
             ],
             [
                 InlineKeyboardButton(text="Завтра утром", callback_data=f"snooze_at:{event_id}:tomorrow_morning"),
@@ -75,12 +64,11 @@ def confirm_delete_keyboard(event_id: int) -> InlineKeyboardMarkup:
 
 def calendar_keyboard(rows) -> InlineKeyboardMarkup:
     buttons = []
-    for event_id, title, kind, starts_at, _status in rows:
-        marker = "задача" if kind == "task" else "событие"
+    for event_id, title, _kind, starts_at, _status in rows:
         buttons.append(
             [
                 InlineKeyboardButton(
-                    text=f"{fmt_dt(starts_at)} · {marker} · {title}"[:64],
+                    text=f"{fmt_dt(starts_at)} · {normalize_title(title)}"[:64],
                     callback_data=f"open:{event_id}",
                 )
             ]
@@ -100,39 +88,29 @@ def calendar_keyboard(rows) -> InlineKeyboardMarkup:
     )
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def manage_keyboard(event_id: int, kind: str, phase: str = "before") -> InlineKeyboardMarkup:
-    if kind == "task":
-        rows = [
-            [InlineKeyboardButton(text="Сделано", callback_data=f"done:{event_id}")],
-            [
-                InlineKeyboardButton(text="Отложить", callback_data=f"snooze:{event_id}"),
-                InlineKeyboardButton(text="Удалить", callback_data=f"cancel:{event_id}"),
-            ],
-        ]
-    elif phase == "started":
+def manage_keyboard(event_id: int, kind: str, phase: str = "before", starts_at: str = None, title: str = None) -> InlineKeyboardMarkup:
+    if phase == "started":
         rows = [
             [
-                InlineKeyboardButton(text="Я тут", callback_data=f"arrived:{event_id}"),
-                InlineKeyboardButton(text="Сделано", callback_data=f"done:{event_id}"),
+                InlineKeyboardButton(text="📍 На месте", callback_data=f"arrived:{event_id}"),
+                InlineKeyboardButton(text="🚶 Еду", callback_data=f"departed:{event_id}"),
             ],
             [
-                InlineKeyboardButton(text="Опаздываю", callback_data=f"late:{event_id}"),
-                InlineKeyboardButton(text="Отложить", callback_data=f"snooze:{event_id}"),
+                InlineKeyboardButton(text="✅ Сделано", callback_data=f"done:{event_id}"),
+                InlineKeyboardButton(text="⏰ Позже", callback_data=f"snooze:{event_id}"),
             ],
-            [InlineKeyboardButton(text="Удалить", callback_data=f"cancel:{event_id}")],
         ]
     else:
         rows = [
             [
-                InlineKeyboardButton(text="Вижу", callback_data=f"seen:{event_id}"),
-                InlineKeyboardButton(text="Выдвигаюсь", callback_data=f"departed:{event_id}"),
+                InlineKeyboardButton(text="👀 Вижу", callback_data=f"seen:{event_id}"),
+                InlineKeyboardButton(text="🚶 Еду", callback_data=f"departed:{event_id}"),
             ],
-            [InlineKeyboardButton(text="Сделано", callback_data=f"done:{event_id}")],
             [
-                InlineKeyboardButton(text="Отложить", callback_data=f"snooze:{event_id}"),
-                InlineKeyboardButton(text="Изменить", callback_data=f"edit:{event_id}"),
+                InlineKeyboardButton(text="✅ Сделано", callback_data=f"done:{event_id}"),
+                InlineKeyboardButton(text="⏰ Позже", callback_data=f"snooze:{event_id}"),
             ],
-            [InlineKeyboardButton(text="Удалить", callback_data=f"cancel:{event_id}")],
         ]
-    rows.append([InlineKeyboardButton(text="Назад к списку", callback_data="list:all")])
+    rows.append([InlineKeyboardButton(text="✏️ Править", callback_data=f"edit:{event_id}")])
+    rows.append([InlineKeyboardButton(text="← Список", callback_data="list:all")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

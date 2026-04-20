@@ -10,6 +10,13 @@ from .models import ParsedIntent
 from .time_utils import month_start_iso, now, parse_dt, scope_window
 
 
+def normalize_title(title: Optional[str]) -> str:
+    cleaned = re.sub(r"\s+", " ", (title or "Без названия")).strip(" .,:;«»\"")
+    if not cleaned:
+        return "Без названия"
+    return cleaned[0].upper() + cleaned[1:]
+
+
 async def month_api_spend(user_id: int) -> float:
     async with aiosqlite.connect(DB_PATH) as db:
         row = await (
@@ -129,6 +136,8 @@ async def init_db() -> None:
             """
         )
         await ensure_column(db, "events", "repeat_until", "TEXT")
+        await ensure_column(db, "events", "google_event_id", "TEXT")
+        await ensure_column(db, "events", "google_synced_at", "TEXT")
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS pending_questions (
@@ -177,6 +186,15 @@ async def init_db() -> None:
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_edits (
+                user_id INTEGER PRIMARY KEY,
+                event_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         await db.commit()
 
 async def ensure_column(db: aiosqlite.Connection, table: str, column: str, column_type: str) -> None:
@@ -208,6 +226,29 @@ async def pop_pending_question(user_id: int) -> Optional[ParsedIntent]:
         await db.commit()
     return ParsedIntent(**json.loads(row[0]))
 
+async def save_pending_edit(user_id: int, event_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO pending_edits(user_id, event_id, created_at)
+            VALUES(?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                event_id=excluded.event_id,
+                created_at=excluded.created_at
+            """,
+            (user_id, event_id, now().isoformat()),
+        )
+        await db.commit()
+
+async def pop_pending_edit(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        row = await (await db.execute("SELECT event_id FROM pending_edits WHERE user_id=?", (user_id,))).fetchone()
+        if not row:
+            return None
+        await db.execute("DELETE FROM pending_edits WHERE user_id=?", (user_id,))
+        await db.commit()
+    return int(row[0])
+
 async def create_event(user_id: int, parsed: ParsedIntent) -> int:
     created = now().isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
@@ -218,7 +259,7 @@ async def create_event(user_id: int, parsed: ParsedIntent) -> int:
             """,
             (
                 user_id,
-                parsed.title or "Без названия",
+                normalize_title(parsed.title),
                 parsed.kind,
                 parsed.starts_at,
                 json.dumps(parsed.reminders or [60, 30]),
@@ -231,6 +272,14 @@ async def create_event(user_id: int, parsed: ParsedIntent) -> int:
         )
         await db.commit()
         return int(cursor.lastrowid)
+
+async def update_event_title(event_id: int, title: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE events SET title=?, updated_at=? WHERE id=?",
+            (normalize_title(title), now().isoformat(), event_id),
+        )
+        await db.commit()
 
 async def find_focus_event(user_id: int):
     current = now()
@@ -466,6 +515,45 @@ async def get_event(event_id: int):
                 (event_id,),
             )
         ).fetchone()
+
+async def get_event_for_sync(event_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        return await (
+            await db.execute(
+                """
+                SELECT id, user_id, title, kind, starts_at, status, reminders_json,
+                       repeat_rule, repeat_until, raw_text, google_event_id
+                FROM events
+                WHERE id=?
+                """,
+                (event_id,),
+            )
+        ).fetchone()
+
+async def set_google_event_id(event_id: int, google_event_id: Optional[str]) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE events SET google_event_id=?, google_synced_at=?, updated_at=? WHERE id=?",
+            (google_event_id, now().isoformat(), now().isoformat(), event_id),
+        )
+        await db.commit()
+
+async def fetch_google_sync_rows(limit: int = 200):
+    async with aiosqlite.connect(DB_PATH) as db:
+        return await (
+            await db.execute(
+                """
+                SELECT id, user_id, title, kind, starts_at, status, reminders_json,
+                       repeat_rule, repeat_until, raw_text, google_event_id
+                FROM events
+                WHERE starts_at IS NOT NULL
+                  AND (status='active' OR google_event_id IS NOT NULL)
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        ).fetchall()
 
 async def update_sent(event_id: int, sent: List[int]) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
