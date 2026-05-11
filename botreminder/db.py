@@ -226,6 +226,11 @@ async def pop_pending_question(user_id: int) -> Optional[ParsedIntent]:
         await db.commit()
     return ParsedIntent(**json.loads(row[0]))
 
+async def clear_pending_question(user_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM pending_questions WHERE user_id=?", (user_id,))
+        await db.commit()
+
 async def save_pending_edit(user_id: int, event_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -248,6 +253,16 @@ async def pop_pending_edit(user_id: int):
         await db.execute("DELETE FROM pending_edits WHERE user_id=?", (user_id,))
         await db.commit()
     return int(row[0])
+
+async def get_pending_edit(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        row = await (await db.execute("SELECT event_id FROM pending_edits WHERE user_id=?", (user_id,))).fetchone()
+    return int(row[0]) if row else None
+
+async def clear_pending_edit(user_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM pending_edits WHERE user_id=?", (user_id,))
+        await db.commit()
 
 async def create_event(user_id: int, parsed: ParsedIntent) -> int:
     created = now().isoformat()
@@ -382,7 +397,11 @@ def next_repeat_start(
         return bool(repeat_until and candidate <= repeat_until)
 
     candidate = None
-    if any(marker in lower for marker in ["каждый день", "ежеднев", "раз в день"]):
+    if any(marker in lower for marker in ["будний день", "будние дни", "по будням"]):
+        candidate = starts_at + timedelta(days=1)
+        while candidate <= now() or candidate.weekday() >= 5:
+            candidate += timedelta(days=1)
+    elif any(marker in lower for marker in ["каждый день", "ежеднев", "раз в день"]):
         candidate = starts_at + timedelta(days=1)
         while candidate <= now():
             candidate += timedelta(days=1)
@@ -420,6 +439,86 @@ def next_repeat_start(
     if candidate and allowed(candidate):
         return candidate
     return None
+
+def repeat_occurrences(
+    starts_at_raw: Optional[str],
+    repeat_rule: Optional[str],
+    repeat_until_raw: Optional[str],
+    window_start: datetime,
+    window_end: datetime,
+    limit: int = 80,
+) -> List[datetime]:
+    starts_at = parse_dt(starts_at_raw)
+    if not starts_at:
+        return []
+    if not repeat_rule:
+        return [starts_at] if window_start <= starts_at <= window_end else []
+
+    lower = repeat_rule.lower()
+    repeat_until = parse_dt(repeat_until_raw) if repeat_until_raw and repeat_until_raw != "never" else None
+    effective_end = min(window_end, repeat_until) if repeat_until else window_end
+    if starts_at > effective_end:
+        return []
+
+    occurrences = []
+
+    def add_if_visible(candidate: datetime) -> None:
+        if window_start <= candidate <= effective_end and len(occurrences) < limit:
+            occurrences.append(candidate)
+
+    if any(marker in lower for marker in ["будний день", "будние дни", "по будням"]):
+        candidate = starts_at
+        while candidate < window_start:
+            candidate += timedelta(days=1)
+        while candidate <= effective_end and len(occurrences) < limit:
+            if candidate.weekday() < 5:
+                add_if_visible(candidate)
+            candidate += timedelta(days=1)
+        return occurrences
+
+    if any(marker in lower for marker in ["каждый день", "ежеднев", "раз в день"]):
+        candidate = starts_at
+        while candidate < window_start:
+            candidate += timedelta(days=1)
+        while candidate <= effective_end and len(occurrences) < limit:
+            add_if_visible(candidate)
+            candidate += timedelta(days=1)
+        return occurrences
+
+    step_days = 14 if any(marker in lower for marker in ["каждые две недели", "каждые 2 недели", "раз в 2 недели", "раз в две недели"]) else None
+    if step_days or any(marker in lower for marker in ["каждую неделю", "еженедель", "раз в неделю"]):
+        candidate = starts_at
+        step = timedelta(days=step_days or 7)
+        while candidate < window_start:
+            candidate += step
+        while candidate <= effective_end and len(occurrences) < limit:
+            add_if_visible(candidate)
+            candidate += step
+        return occurrences
+
+    if any(marker in lower for marker in ["каждый месяц", "раз в месяц", "ежемесяч"]):
+        day_match = re.search(r"\b([1-9]|[12]\d|3[01])\s*(?:числа|число)?\b", lower)
+        day = int(day_match.group(1)) if day_match else starts_at.day
+        year = starts_at.year
+        month = starts_at.month
+        while len(occurrences) < limit:
+            try:
+                candidate = starts_at.replace(year=year, month=month, day=day)
+            except ValueError:
+                candidate = None
+            if candidate and candidate > effective_end:
+                break
+            if candidate and candidate >= starts_at:
+                add_if_visible(candidate)
+            month += 1
+            if month == 13:
+                month = 1
+                year += 1
+            if datetime(year, month, 1, tzinfo=starts_at.tzinfo) > effective_end + timedelta(days=31):
+                break
+        return occurrences
+
+    return [starts_at] if window_start <= starts_at <= effective_end else []
 
 async def snooze_event_to(event_id: int, new_start: datetime) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -494,18 +593,31 @@ async def fetch_calendar_rows(user_id: int, scope: str):
                     (user_id,),
                 )
             ).fetchall()
-        return await (
+        rows = await (
             await db.execute(
                 """
-                SELECT id, title, kind, starts_at, status FROM events
+                SELECT id, title, kind, starts_at, status, repeat_rule, repeat_until FROM events
                 WHERE user_id=? AND status='active'
-                  AND (starts_at IS NULL OR starts_at BETWEEN ? AND ?)
+                  AND (
+                    starts_at IS NULL
+                    OR starts_at <= ?
+                    OR repeat_rule IS NOT NULL
+                  )
                 ORDER BY starts_at IS NULL, starts_at
-                LIMIT 50
+                LIMIT 120
                 """,
-                (user_id, start.isoformat(), end.isoformat()),
+                (user_id, end.isoformat()),
             )
         ).fetchall()
+    expanded = []
+    for event_id, title, kind, starts_at, status, repeat_rule, repeat_until in rows:
+        if not starts_at:
+            expanded.append((event_id, title, kind, starts_at, status))
+            continue
+        for occurrence in repeat_occurrences(starts_at, repeat_rule, repeat_until, start, end):
+            expanded.append((event_id, title, kind, occurrence.isoformat(), status))
+    expanded.sort(key=lambda row: (row[3] is None, row[3] or ""))
+    return expanded[:50]
 
 async def get_event(event_id: int):
     async with aiosqlite.connect(DB_PATH) as db:

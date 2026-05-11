@@ -114,3 +114,11 @@ def manage_keyboard(event_id: int, kind: str, phase: str = "before", starts_at: 
     rows.append([InlineKeyboardButton(text="✏️ Править", callback_data=f"edit:{event_id}")])
     rows.append([InlineKeyboardButton(text="← Список", callback_data="list:all")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def edit_context_keyboard(event_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Готово с правкой", callback_data=f"edit_done:{event_id}")],
+            [InlineKeyboardButton(text="← Список", callback_data="list:all")],
+        ]
+    )

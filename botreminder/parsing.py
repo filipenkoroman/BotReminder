@@ -69,14 +69,20 @@ def extract_bare_time(lower: str) -> tuple[Optional[int], Optional[int], bool]:
 def clean_title(text: str) -> str:
     title = re.sub(r"^[\s,.:;]*(напомни|напоминай|напоминать)\s+(что\s+)?", "", text, flags=re.I)
     title = re.sub(
-        r"\b(раз в месяц|каждый месяц|ежемесячно)\s+([1-9]|[12]\d|3[01])?\s*(?:числа|число)?\b",
+        r"\b(раз в месяц|каждый месяц|ежемесячно)\s+([1-9]|[12]\d|3[01])?\s*(?:числ\w*)?\b",
+        "",
+        title,
+        flags=re.I,
+    )
+    title = re.sub(
+        r"\b([1-9]|[12]\d|3[01])\s*(?:числ\w*)?\s+(?:каждого|каждый|каждом)\s+месяц\w*\b",
         "",
         title,
         flags=re.I,
     )
     title = re.sub(r"\b(напомни|напоминай|напоминать)\s+(что\s+)?", "", title, flags=re.I)
     title = re.sub(
-        r"\b(каждого|каждое|каждый)\s+([1-9]|[12]\d|3[01])\s*(?:числа|число)?\b",
+        r"\b(каждого|каждое|каждый)\s+([1-9]|[12]\d|3[01])\s*(?:числ\w*)?\b",
         "",
         title,
         flags=re.I,
@@ -170,6 +176,8 @@ def fallback_parse(text: str) -> ParsedIntent:
 
 def repeat_rule_from_text(text: str) -> Optional[str]:
     lower = text.lower()
+    if any(marker in lower for marker in ["будний день", "будние дни", "по будням", "каждый будний", "раз в будний"]):
+        return "каждый будний день"
     if any(marker in lower for marker in ["каждый день", "ежеднев", "раз в день"]):
         return "каждый день"
     if any(marker in lower for marker in ["каждые 2 недели", "каждые две недели", "раз в 2 недели", "раз в две недели"]):
@@ -191,7 +199,7 @@ def repeat_rule_from_text(text: str) -> Optional[str]:
     month_day = monthly_day_from_text(text)
     if month_day:
         return f"каждый месяц {month_day} числа"
-    if any(marker in lower for marker in ["каждый месяц", "ежемесяч", "раз в месяц"]):
+    if any(marker in lower for marker in ["каждый месяц", "каждого месяца", "ежемесяч", "раз в месяц"]):
         return "каждый месяц"
     return None
 
@@ -289,8 +297,8 @@ def next_monthly_occurrence(day: int, hour: int = 9, minute: int = 0) -> datetim
 
 def monthly_day_from_text(text: str) -> Optional[int]:
     lower = text.lower()
-    has_monthly_marker = any(marker in lower for marker in ["раз в месяц", "каждый месяц", "ежемесяч"])
-    ordinal_match = re.search(r"\b(?:каждого|каждое|каждый)\s+([1-9]|[12]\d|3[01])\s*(?:числа|число)?\b", lower)
+    has_monthly_marker = any(marker in lower for marker in ["раз в месяц", "каждый месяц", "каждого месяца", "ежемесяч"])
+    ordinal_match = re.search(r"\b(?:каждого|каждое|каждый)\s+([1-9]|[12]\d|3[01])\s*(?:числ\w*)?\b", lower)
     if ordinal_match:
         return int(ordinal_match.group(1))
     if not has_monthly_marker:
@@ -320,15 +328,16 @@ def normalize_parsed_intent(parsed: ParsedIntent) -> ParsedIntent:
         except ValueError:
             starts_at = None
 
-    if day and (not starts_at or starts_at <= now()):
+    if day:
         hour = starts_at.hour if starts_at else 9
         minute = starts_at.minute if starts_at else 0
         next_start = next_monthly_occurrence(day, hour, minute)
-        parsed.starts_at = next_start.isoformat()
+        if not starts_at or starts_at.date() != next_start.date() or starts_at <= now():
+            parsed.starts_at = next_start.isoformat()
+            parsed.assumptions = list(parsed.assumptions or [])
+            parsed.assumptions.append(f"поставил ближайшее {day} число: {next_start.strftime('%d.%m.%Y')}")
+            starts_at = next_start
         parsed.repeat_rule = parsed.repeat_rule or f"каждый месяц {day} числа"
-        parsed.assumptions = list(parsed.assumptions or [])
-        parsed.assumptions.append(f"исправил дату в прошлом: ближайшее {day} число — {next_start.strftime('%d.%m.%Y')}")
-        starts_at = next_start
 
     if starts_at and starts_at <= now() and not day:
         shifted = starts_at + timedelta(days=1)
@@ -479,15 +488,40 @@ def named_snooze_time(kind: str) -> datetime:
 
 def time_from_text(text: str) -> Optional[datetime]:
     lower = text.lower()
+    current = now()
+    date_match = re.search(r"\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b", lower)
+    if date_match and 1 <= int(date_match.group(2)) <= 12:
+        tail = lower[date_match.end():]
+        time_match = re.search(r"\b(?:в|к|на|около|примерно)?\s*(\d{1,2})(?:(?::|\.|\s+)(\d{2}))\b", tail)
+        if not time_match:
+            return None
+        day = int(date_match.group(1))
+        month = int(date_match.group(2))
+        year_raw = date_match.group(3)
+        year = int(year_raw) if year_raw else current.year
+        if year < 100:
+            year += 2000
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2))
+        if hour > 23 or minute > 59:
+            return None
+        try:
+            candidate = current.replace(year=year, month=month, day=day, hour=hour, minute=minute)
+        except ValueError:
+            return None
+        if not year_raw and candidate < current - timedelta(minutes=15):
+            candidate = candidate.replace(year=year + 1)
+        return candidate
+
     hour, minute, _vague = extract_time(lower)
     if hour is None or minute is None:
         hour, minute, _vague = extract_bare_time(lower)
     if hour is None or minute is None:
         return None
-    candidate = now().replace(hour=hour, minute=minute)
+    candidate = current.replace(hour=hour, minute=minute)
     if "завтра" in lower:
         candidate = candidate + timedelta(days=1)
-    elif candidate < now() - timedelta(minutes=15):
+    elif candidate < current - timedelta(minutes=15):
         candidate = candidate + timedelta(days=1)
     return candidate
 

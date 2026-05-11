@@ -21,12 +21,20 @@ function doPost(e) {
 
     if (payload.status === 'cancelled') {
       if (event) {
-        event.deleteEvent();
+        deleteCalendarThing(event);
       }
       return jsonResponse({ ok: true, google_event_id: null });
     }
 
-    if (event) {
+    if (payload.recurrence) {
+      if (event) {
+        deleteCalendarThing(event);
+      }
+      const recurrence = buildRecurrence(payload.recurrence, payload.timezone);
+      event = calendar.createEventSeries(payload.summary || 'BotReminder', start, end, recurrence, {
+        description: payload.description || '',
+      });
+    } else if (event) {
       event.setTitle(payload.summary || 'BotReminder');
       event.setTime(start, end);
       event.setDescription(payload.description || '');
@@ -36,15 +44,67 @@ function doPost(e) {
       });
     }
 
-    event.setTag('botreminder_id', botEventId);
-    event.removeAllReminders();
+    setTagIfPossible(event, 'botreminder_id', botEventId);
+    removeRemindersIfPossible(event);
     (payload.reminders || []).slice(0, 5).forEach(function(minutes) {
-      event.addPopupReminder(Number(minutes));
+      addReminderIfPossible(event, Number(minutes));
     });
 
     return jsonResponse({ ok: true, google_event_id: event.getId() });
   } catch (err) {
     return jsonResponse({ ok: false, error: String(err && err.message ? err.message : err) });
+  }
+}
+
+function buildRecurrence(recurrencePayload, timezone) {
+  let recurrence = CalendarApp.newRecurrence().setTimeZone(timezone || 'Asia/Novosibirsk');
+  let rule;
+  if (recurrencePayload.frequency === 'weekdays') {
+    rule = recurrence.addWeeklyRule().onlyOnWeekdays([
+      CalendarApp.Weekday.MONDAY,
+      CalendarApp.Weekday.TUESDAY,
+      CalendarApp.Weekday.WEDNESDAY,
+      CalendarApp.Weekday.THURSDAY,
+      CalendarApp.Weekday.FRIDAY,
+    ]);
+  } else if (recurrencePayload.frequency === 'daily') {
+    rule = recurrence.addDailyRule();
+  } else if (recurrencePayload.frequency === 'biweekly') {
+    rule = recurrence.addWeeklyRule().interval(2);
+  } else if (recurrencePayload.frequency === 'monthly') {
+    rule = recurrence.addMonthlyRule();
+  } else {
+    rule = recurrence.addWeeklyRule();
+  }
+  if (recurrencePayload.until) {
+    rule.until(new Date(recurrencePayload.until));
+  }
+  return recurrence;
+}
+
+function deleteCalendarThing(event) {
+  if (typeof event.deleteEventSeries === 'function') {
+    event.deleteEventSeries();
+  } else {
+    event.deleteEvent();
+  }
+}
+
+function setTagIfPossible(event, key, value) {
+  if (typeof event.setTag === 'function') {
+    event.setTag(key, value);
+  }
+}
+
+function removeRemindersIfPossible(event) {
+  if (typeof event.removeAllReminders === 'function') {
+    event.removeAllReminders();
+  }
+}
+
+function addReminderIfPossible(event, minutes) {
+  if (typeof event.addPopupReminder === 'function') {
+    event.addPopupReminder(minutes);
   }
 }
 
@@ -54,6 +114,12 @@ function findBotReminderEvent(calendar, googleEventId, botEventId, start) {
       const event = calendar.getEventById(googleEventId);
       if (event) {
         return event;
+      }
+    } catch (err) {}
+    try {
+      const eventSeries = calendar.getEventSeriesById(googleEventId);
+      if (eventSeries) {
+        return eventSeries;
       }
     } catch (err) {}
   }

@@ -37,8 +37,18 @@ def has_any_phrase(text: str, phrases: list[str]) -> bool:
 
 def local_command_intent(text: str) -> Optional[CommandIntent]:
     lower = text.lower().strip(" .,!?:;")
+    if lower.startswith(("перенеси", "перенести", "отложи", "отложить", "измени время", "поменяй время", "измени дату", "поменяй дату", "измени на", "поменяй на")):
+        minutes_match = re.search(r"на\s+(\d+)\s*(минут|мин|час|часа|часов)", lower)
+        if minutes_match and lower.startswith(("перенеси", "перенести", "отложи", "отложить")):
+            value = int(minutes_match.group(1))
+            minutes = value * 60 if minutes_match.group(2).startswith("час") else value
+            return CommandIntent(action="snooze", confidence=0.9, minutes=minutes)
+        new_start = time_from_text(lower)
+        if new_start:
+            return CommandIntent(action="reschedule", confidence=0.9, starts_at=new_start.isoformat())
+
     rename_match = re.search(
-        r"^(?:измени|изменить|поменяй|поменять|переименуй|переименовать)\s+(?:название|имя|текст)?\s*(?:(?:на|в)\s+|[:\-–—]\s*)(.+)$",
+        r"^(?:(?:измени|изменить|поменяй|поменять)\s+(?:название|имя|текст)|(?:переименуй|переименовать))\s*(?:(?:на|в)\s+|[:\-–—]\s*)?(.+)$",
         text.strip(" .,!?:;"),
         flags=re.I,
     )
@@ -77,16 +87,6 @@ def local_command_intent(text: str) -> Optional[CommandIntent]:
 
     if has_any_phrase(lower, ["выезжаю", "выехал", "еду", "выдвигаюсь"]):
         return CommandIntent(action="departed", confidence=0.9)
-
-    if lower.startswith(("перенеси", "перенести", "отложи", "отложить")):
-        minutes_match = re.search(r"на\s+(\d+)\s*(минут|мин|час|часа|часов)", lower)
-        if minutes_match:
-            value = int(minutes_match.group(1))
-            minutes = value * 60 if minutes_match.group(2).startswith("час") else value
-            return CommandIntent(action="snooze", confidence=0.9, minutes=minutes)
-        new_start = time_from_text(lower)
-        if new_start:
-            return CommandIntent(action="reschedule", confidence=0.9, starts_at=new_start.isoformat())
 
     return None
 

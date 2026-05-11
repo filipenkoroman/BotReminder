@@ -10,7 +10,10 @@ from .commands import ai_command_intent, apply_command_intent, local_command_int
 from .config import BOT_OWNER_ID, DB_PATH, dp
 from .db import (
     cancel_event,
+    clear_pending_edit,
+    clear_pending_question,
     find_focus_event,
+    get_pending_edit,
     get_event,
     log_event,
     mark_event_arrived,
@@ -18,7 +21,6 @@ from .db import (
     mark_event_seen,
     mark_task_done,
     pop_pending_question,
-    pop_pending_edit,
     save_learning_example,
     save_pending_edit,
     save_pending_question,
@@ -26,7 +28,7 @@ from .db import (
     update_event_title,
     normalize_title,
 )
-from .keyboards import confirm_delete_keyboard, manage_keyboard, snooze_keyboard
+from .keyboards import confirm_delete_keyboard, edit_context_keyboard, manage_keyboard, snooze_keyboard
 from .google_sync import sync_google_event
 from .models import ParsedIntent
 from .parsing import (
@@ -75,6 +77,44 @@ def looks_like_plain_title(text: str) -> bool:
         return False
     return True
 
+def starts_new_reminder(text: str) -> bool:
+    return text.lower().strip().startswith(("напомни", "напоминай", "запиши", "создай", "поставь"))
+
+def looks_like_repeat_until_answer(text: str) -> bool:
+    lower = text.lower().strip(" .,!?:;")
+    if lower in {"навсегда", "бессрочно", "пока не отменю", "без конца"}:
+        return True
+    if lower.startswith("до "):
+        return True
+    return bool(re.match(r"^на\s+\d+\s*(день|дня|дней|неделю|недели|недель|месяц|месяца|месяцев|год|года|лет)\b", lower))
+
+def looks_like_existing_command(text: str) -> bool:
+    lower = text.lower().strip()
+    return lower.startswith(
+        (
+            "перенеси",
+            "перенести",
+            "отложи",
+            "отложить",
+            "измени",
+            "изменить",
+            "поменяй",
+            "поменять",
+            "переименуй",
+            "переименовать",
+            "удали",
+            "удалить",
+            "отмени",
+            "отменить",
+            "закрой",
+            "закрыть",
+            "заверши",
+            "завершить",
+            "сделано",
+            "готово",
+        )
+    )
+
 async def handle_pending_edit(message: Message, event_id: int, text: str) -> bool:
     row = await get_event(event_id)
     if not row:
@@ -85,20 +125,26 @@ async def handle_pending_edit(message: Message, event_id: int, text: str) -> boo
     focus = (_id, title, kind, starts_at, reminders, sent, seen, departed, confirmed, done)
     lower = text.lower().strip(" .,!?:;")
     if lower in {"отмена", "отбой", "ничего", "не надо"}:
+        await clear_pending_edit(message.from_user.id)
         await message.answer("Окей, редактирование отменил.")
         return True
 
     local_intent = local_command_intent(text)
     if local_intent and await apply_command_intent(message, focus, local_intent):
+        await save_pending_edit(message.from_user.id, event_id)
         return True
 
     ai_intent = await ai_command_intent(text, title, message.from_user.id)
     if ai_intent and ai_intent.confidence >= 0.55 and ai_intent.action != "new":
-        return await apply_command_intent(message, focus, ai_intent)
+        handled = await apply_command_intent(message, focus, ai_intent)
+        if handled:
+            await save_pending_edit(message.from_user.id, event_id)
+        return handled
 
     if looks_like_plain_title(text):
         await update_event_title(event_id, text)
         await sync_google_event(event_id)
+        await save_pending_edit(message.from_user.id, event_id)
         await message.answer(f"Переименовал: {normalize_title(text)}.")
         return True
 
@@ -185,15 +231,29 @@ async def handle_text(message: Message, text: str) -> None:
         await message.answer("Запомнил этот кейс. В следующих разборах буду учитывать.")
         return
 
-    pending_edit_event_id = await pop_pending_edit(message.from_user.id)
-    if pending_edit_event_id:
-        if await handle_pending_edit(message, pending_edit_event_id, text):
-            return
+    if starts_new_reminder(text):
+        await clear_pending_edit(message.from_user.id)
+        await clear_pending_question(message.from_user.id)
+        pending = None
+    else:
+        pending = await pop_pending_question(message.from_user.id)
+        if pending and looks_like_existing_command(text):
+            await log_event(
+                message.from_user.id,
+                "pending_question_skipped",
+                text,
+                {"pending_title": pending.title, "pending_original_text": pending.original_text},
+            )
+            pending = None
+        elif pending and pending.needs_repeat_until_question and not looks_like_repeat_until_answer(text):
+            await log_event(
+                message.from_user.id,
+                "pending_repeat_skipped",
+                text,
+                {"pending_title": pending.title, "pending_original_text": pending.original_text},
+            )
+            pending = None
 
-    if await handle_quick_reply(message, text):
-        return
-
-    pending = await pop_pending_question(message.from_user.id)
     if pending:
         if pending.needs_repeat_until_question:
             parsed = apply_repeat_until_to_pending(pending, text)
@@ -208,6 +268,13 @@ async def handle_text(message: Message, text: str) -> None:
             combined = f"{pending.original_text}. Уточнение пользователя: {text}"
             parsed = merge_pending_with_parsed(pending, await ai_parse(combined, message.from_user.id))
     else:
+        pending_edit_event_id = None if starts_new_reminder(text) else await get_pending_edit(message.from_user.id)
+        if pending_edit_event_id and await handle_pending_edit(message, pending_edit_event_id, text):
+            return
+
+        if await handle_quick_reply(message, text):
+            return
+
         parsed = await ai_parse(text, message.from_user.id)
 
     if parsed.action == "list":
@@ -332,6 +399,8 @@ async def callbacks(query: CallbackQuery) -> None:
     data = query.data or ""
     await log_event(query.from_user.id, "callback", data, {"callback": data})
     if data.startswith("list:"):
+        await clear_pending_edit(query.from_user.id)
+        await clear_pending_question(query.from_user.id)
         _action, scope = data.split(":", 1)
         await send_calendar_to_chat(query.message.chat.id, query.from_user.id, scope)
         await query.answer()
@@ -339,6 +408,8 @@ async def callbacks(query: CallbackQuery) -> None:
 
     if data.startswith("open:"):
         _action, event_id_raw = data.split(":", 1)
+        await clear_pending_question(query.from_user.id)
+        await save_pending_edit(query.from_user.id, int(event_id_raw))
         await send_event_details(query.message.chat.id, int(event_id_raw))
         await query.answer()
         return
@@ -348,6 +419,13 @@ async def callbacks(query: CallbackQuery) -> None:
     row = await get_event(event_id)
     if not row:
         await query.answer("Не нашел напоминание")
+        return
+
+    if action == "edit_done":
+        await clear_pending_edit(query.from_user.id)
+        await clear_pending_question(query.from_user.id)
+        await query.message.answer("Окей, вышел из правки. Дальше буду снова выбирать контекст обычным способом.")
+        await query.answer()
         return
 
     if action == "seen":
@@ -389,13 +467,18 @@ async def callbacks(query: CallbackQuery) -> None:
         await sync_google_event(event_id)
         await query.message.answer(f"Перенес. Новое время: {new_start.strftime('%d.%m %H:%M')}")
     elif action == "cancel":
+        await clear_pending_edit(query.from_user.id)
+        await clear_pending_question(query.from_user.id)
         await query.message.answer("Точно удалить?", reply_markup=confirm_delete_keyboard(event_id))
     elif action == "confirm_cancel":
         await cancel_event(event_id)
         await sync_google_event(event_id)
+        await clear_pending_edit(query.from_user.id)
+        await clear_pending_question(query.from_user.id)
         await query.message.answer("Удалил.")
         await send_calendar_to_chat(query.message.chat.id, query.from_user.id, "all")
     elif action == "edit":
+        await clear_pending_question(query.from_user.id)
         await save_pending_edit(query.from_user.id, event_id)
         await query.message.answer(
             "Что изменить?\n"
@@ -405,5 +488,8 @@ async def callbacks(query: CallbackQuery) -> None:
             "«Поменяй название - Оплата за гараж родителей»\n"
             "«Перенеси на завтра в 15:00»\n"
             "«Отложи на 30 минут»"
+            "\n\nПока не нажмешь «Готово с правкой», все короткие команды будут относиться к этому напоминанию."
+            ,
+            reply_markup=edit_context_keyboard(event_id),
         )
     await query.answer()

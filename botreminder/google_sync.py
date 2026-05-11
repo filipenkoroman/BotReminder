@@ -12,6 +12,28 @@ from .time_utils import parse_dt
 def google_sync_enabled() -> bool:
     return bool(GOOGLE_CALENDAR_ID and GOOGLE_APPS_SCRIPT_URL and GOOGLE_APPS_SCRIPT_SECRET)
 
+def recurrence_payload(repeat_rule: Optional[str], repeat_until: Optional[str]) -> Optional[dict]:
+    if not repeat_rule:
+        return None
+    lower = repeat_rule.lower()
+    payload = {"until": repeat_until if repeat_until and repeat_until != "never" else None}
+    if any(marker in lower for marker in ["будний день", "будние дни", "по будням"]):
+        payload["frequency"] = "weekdays"
+        return payload
+    if any(marker in lower for marker in ["каждый день", "ежеднев", "раз в день"]):
+        payload["frequency"] = "daily"
+        return payload
+    if any(marker in lower for marker in ["каждые две недели", "каждые 2 недели", "раз в 2 недели", "раз в две недели"]):
+        payload["frequency"] = "biweekly"
+        return payload
+    if any(marker in lower for marker in ["каждую неделю", "еженедель", "раз в неделю"]):
+        payload["frequency"] = "weekly"
+        return payload
+    if any(marker in lower for marker in ["каждый месяц", "раз в месяц", "ежемесяч"]):
+        payload["frequency"] = "monthly"
+        return payload
+    return None
+
 
 def _event_payload(row) -> Optional[dict]:
     _id, _user_id, title, _kind, starts_at_raw, status, reminders_raw, repeat_rule, repeat_until, raw_text, _google_id = row
@@ -44,6 +66,7 @@ def _event_payload(row) -> Optional[dict]:
         "end_at": end.isoformat(),
         "timezone": getattr(BOT_TIMEZONE, "key", "Asia/Novosibirsk"),
         "reminders": reminders,
+        "recurrence": recurrence_payload(repeat_rule, repeat_until),
     }
 
 
